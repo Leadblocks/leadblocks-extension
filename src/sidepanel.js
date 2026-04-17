@@ -13,7 +13,7 @@ const STEPS = [
 const state = {
   // Auth
   token: null,
-  backendUrl: 'https://backend.leadblocks.nl/',
+  backendUrl: 'https://backend.leadblocks.nl',
 
   // Current step
   currentStep: 0,
@@ -147,7 +147,7 @@ function loadStoredAuth() {
       if (data.token) state.token = data.token;
       // Only update backendUrl if we have a stored value, otherwise keep default
       if (data.backendUrl && typeof data.backendUrl === 'string' && data.backendUrl.trim()) {
-        state.backendUrl = data.backendUrl.trim();
+        state.backendUrl = data.backendUrl.trim().replace(/\/+$/, '');
       }
       console.log('[Auth] State after loading:', { backendUrl: state.backendUrl, token: !!state.token });
       resolve();
@@ -413,7 +413,7 @@ function render() {
 // --- Login ---
 
 function buildLogin() {
-  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl/';
+  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl';
   return `
     <div class="header">
       <img src="../assets/logo.png" alt="Leadblocks" class="logo" />
@@ -739,28 +739,33 @@ function buildRevokeList() {
     const isActioned = !!state.actionedTasks[task.id];
     const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
     const campaignHtml = buildCampaignPill(task);
-    const name = [task.first_name, task.last_name].filter(Boolean).join(' ') || '';
-
     if (isActioned) {
       return `
         <div class="revoke-row revoke-row-actioned">
-          <span class="revoke-name">${esc(name)}</span>
-          ${campaignHtml}
-          ${dueHtml}
-          <span class="actioned-inline">${esc(state.actionedTasks[task.id])}</span>
+          <div class="revoke-line1">
+            ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank">${esc(task.profile_url)}</a>` : ''}
+            ${dueHtml}
+          </div>
+          <div class="revoke-line2">
+            ${campaignHtml}
+            <span class="actioned-inline">${esc(state.actionedTasks[task.id])}</span>
+          </div>
         </div>
       `;
     }
 
     return `
       <div class="revoke-row">
-        <span class="revoke-name">${esc(name)}</span>
-        ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank" title="${esc(task.profile_url)}">↗</a>` : ''}
-        ${campaignHtml}
-        ${dueHtml}
-        <span class="revoke-actions">
-          <button class="btn btn-revoke btn-xs" data-action="revoke" data-tid="${task.id}">Revoke</button>
-        </span>
+        <div class="revoke-line1">
+          ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank">${esc(task.profile_url)}</a>` : ''}
+          ${dueHtml}
+        </div>
+        <div class="revoke-line2">
+          ${campaignHtml}
+          <span class="revoke-actions">
+            <button class="btn btn-revoke btn-xs" data-action="revoke" data-tid="${task.id}">Revoke</button>
+          </span>
+        </div>
       </div>
     `;
   }).join('');
@@ -1103,7 +1108,7 @@ function el(id) { return document.getElementById(id); }
 
 async function doLogin() {
   const isProduction = el('chk-production')?.checked;
-  const backendUrl = isProduction ? 'https://backend.leadblocks.nl/' : 'http://localhost:1337';
+  const backendUrl = isProduction ? 'https://backend.leadblocks.nl' : 'http://localhost:1337';
   const email = el('inp-email')?.value?.trim();
   const password = el('inp-password')?.value;
   const errEl = el('login-error');
