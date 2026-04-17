@@ -13,7 +13,7 @@ const STEPS = [
 const state = {
   // Auth
   token: null,
-  backendUrl: 'http://localhost:1337',
+  backendUrl: 'https://backend.leadblocks.nl/',
 
   // Current step
   currentStep: 0,
@@ -185,7 +185,7 @@ async function fetchCustomers() {
   let page = 1;
   while (true) {
     const data = await apiGet(
-      `/api/customers?populate[profiles]=true&pagination[page]=${page}&pagination[pageSize]=100`
+      `/api/customers?populate[profiles]=true&filters[lead_phase][$eq]=Active&pagination[page]=${page}&pagination[pageSize]=100`
     );
     const batch = (data.data || []).map(c => ({
       id: c.id,
@@ -437,6 +437,7 @@ function render() {
 // --- Login ---
 
 function buildLogin() {
+  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl/';
   return `
     <div class="header">
       <img src="../assets/logo.png" alt="Leadblocks" class="logo" />
@@ -444,8 +445,11 @@ function buildLogin() {
     <div class="login-form">
       <h2>Sign in</h2>
       <div class="field">
-        <label>Backend URL</label>
-        <input type="url" id="inp-backend" value="${esc(state.backendUrl)}" placeholder="http://localhost:1337" />
+        <label for="chk-production">Environment</label>
+        <div class="checkbox-option">
+          <input type="checkbox" id="chk-production" ${isProduction ? 'checked' : ''} />
+          <span>Production</span>
+        </div>
       </div>
       <div class="field">
         <label>Email</label>
@@ -1068,24 +1072,14 @@ function el(id) { return document.getElementById(id); }
 // =============================================================================
 
 async function doLogin() {
-  const backendUrl = el('inp-backend')?.value?.trim();
+  const isProduction = el('chk-production')?.checked;
+  const backendUrl = isProduction ? 'https://backend.leadblocks.nl/' : 'http://localhost:1337';
   const email = el('inp-email')?.value?.trim();
   const password = el('inp-password')?.value;
   const errEl = el('login-error');
 
-  if (!backendUrl || !email || !password) {
+  if (!email || !password) {
     if (errEl) { errEl.textContent = 'Please fill in all fields.'; errEl.style.display = 'block'; }
-    return;
-  }
-
-  // Validate backend URL format
-  try {
-    const url = new URL(backendUrl);
-    if (!url.protocol.startsWith('http')) {
-      throw new Error('Invalid protocol');
-    }
-  } catch (e) {
-    if (errEl) { errEl.textContent = 'Please enter a valid HTTP/HTTPS URL for the backend.'; errEl.style.display = 'block'; }
     return;
   }
 

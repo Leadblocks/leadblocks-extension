@@ -13,7 +13,7 @@ const STEPS = [
 const state = {
   // Auth
   token: null,
-  backendUrl: 'http://localhost:1337',
+  backendUrl: 'https://backend.leadblocks.nl/',
 
   // Current step
   currentStep: 0,
@@ -185,7 +185,7 @@ async function fetchCustomers() {
   let page = 1;
   while (true) {
     const data = await apiGet(
-      `/api/customers?populate[profiles]=true&pagination[page]=${page}&pagination[pageSize]=100`
+      `/api/customers?populate[profiles]=true&filters[lead_phase][$eq]=Active&pagination[page]=${page}&pagination[pageSize]=100`
     );
     const batch = (data.data || []).map(c => ({
       id: c.id,
@@ -239,33 +239,7 @@ async function loadAllTasks() {
       if (state.appliedLinkedInSearch) params.append('profileUrlSearch', state.appliedLinkedInSearch);
 
       const result = await apiGet(`/api/extension/revoke-tasks?${params.toString()}`);
-      // Only show tasks with due_date today or in the past
-      const today = new Date();
-      today.setHours(23, 59, 59, 999);
-      all = (result.data || []).filter(t => {
-        if (!t.due_date) return true;
-        return new Date(t.due_date) <= today;
-      });
-    } else {
-      // Default: paginated fetch from all-robot-tasks
-      let page = 1;
-      const pageSize = 50;
-
-      while (true) {
-        const params = new URLSearchParams();
-        params.append('page', String(page));
-        params.append('pageSize', String(pageSize));
-        params.append('profileIds', state.appliedProfileId);
-        params.append('dataTypes', 'Connection Details');
-        params.append('dataTypes', 'Revoke connection request');
-        if (state.appliedLinkedInSearch) params.append('profileUrlSearch', state.appliedLinkedInSearch);
-        if (state.appliedCampaignId) params.append('campaignIds', state.appliedCampaignId);
-
-        const result = await apiGet(`/api/all-robot-tasks?${params.toString()}`);
-        all = all.concat(result.data || []);
-        if (all.length >= (result.meta?.pagination?.total || 0)) break;
-        page++;
-      }
+      all = result.data || [];
     }
 
     state.tasks = all;
@@ -327,6 +301,7 @@ async function handleConnect(taskId) {
   try {
     await apiPost('/api/data-senders/connect', {
       ...task,
+      revoke_task_id: task.id,
       email: contact.email || '',
       phone: contact.phone || '',
       birthday: contact.birthday || '',
@@ -409,6 +384,7 @@ async function handleFirstConnectionConnect() {
     await apiPost('/api/extension/connection-acceptance/first-connection', {
       profileId: state.appliedProfileId,
       prospectId,
+      prospect_name: state.pendingProspectName || '',
       email: contact.email || '',
       phone: contact.phone || '',
       birthday: contact.birthday || '',
@@ -437,6 +413,7 @@ function render() {
 // --- Login ---
 
 function buildLogin() {
+  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl/';
   return `
     <div class="header">
       <img src="../assets/logo.png" alt="Leadblocks" class="logo" />
@@ -444,12 +421,15 @@ function buildLogin() {
     <div class="login-form">
       <h2>Sign in</h2>
       <div class="field">
-        <label>Backend URL</label>
-        <input type="url" id="inp-backend" value="${esc(state.backendUrl)}" placeholder="http://localhost:1337" />
+        <label for="chk-production">Environment</label>
+        <div class="checkbox-option">
+          <input type="checkbox" id="chk-production" ${isProduction ? 'checked' : ''} />
+          <span>Production</span>
+        </div>
       </div>
       <div class="field">
-        <label>Email</label>
-        <input type="email" id="inp-email" placeholder="user@example.com" autocomplete="email" />
+        <label>Username</label>
+        <input type="text" id="inp-email" placeholder="username" autocomplete="username" />
       </div>
       <div class="field">
         <label>Password</label>
@@ -606,6 +586,11 @@ function buildTaskArea() {
     return `<div class="empty-state">No tasks found.</div>`;
   }
 
+  // Revoke step: always show compact list for fast bulk revoking
+  if (step.key === 'revoke_connection_request') {
+    return buildRevokeList();
+  }
+
   return `${buildQueueMode()}`;
 }
 
@@ -616,7 +601,7 @@ function buildConnectionAcceptanceArea() {
 
   // No lookup performed yet
   if (!r) {
-    return `<div class="empty-state">Hover over the <strong>Bericht</strong> button for the prospect that connected and the prospect filter will be filled, then press Filter.</div>`;
+    return `<div class="empty-state">Go to <a href="https://www.linkedin.com/mynetwork/invite-connect/connections/" target="_blank" class="hint-link">https://www.linkedin.com/mynetwork/invite-connect/connections/</a> and hover over the <strong>Bericht</strong> button for the prospect that connected. The prospect filter will be filled, then press Filter.</div>`;
   }
 
   // Already actioned in this session
@@ -670,7 +655,6 @@ function buildConnectionAcceptanceArea() {
 
         <div class="task-actions">
           <button class="btn btn-primary btn-sm" data-action="connect" data-tid="${task.id}">Connect</button>
-          <button class="btn btn-revoke btn-sm" data-action="revoke" data-tid="${task.id}">Revoke</button>
           <button class="btn btn-danger btn-sm" data-action="disconnect" data-tid="${task.id}">Disconnect</button>
         </div>
       </div>
@@ -683,6 +667,17 @@ function buildConnectionAcceptanceArea() {
       <div class="empty-state" style="padding:24px 0">
         <strong>Already connected</strong><br><br>
         This prospect was already processed. No action needed.<br>
+        Hover over the next Bericht button and press Filter.
+      </div>
+    `;
+  }
+
+  // status: 'already_first_connected' — first connection already processed
+  if (r.status === 'already_first_connected') {
+    return `
+      <div class="empty-state" style="padding:24px 0">
+        <strong>Already first connected</strong><br><br>
+        This prospect was already processed as a first connection. No action needed.<br>
         Hover over the next Bericht button and press Filter.
       </div>
     `;
@@ -735,6 +730,45 @@ function buildConnectionAcceptanceArea() {
 
   // Fallback
   return `<div class="empty-state">No result. Hover over the Bericht button and press Filter.</div>`;
+}
+
+// --- Revoke list (compact line-by-line) ---
+
+function buildRevokeList() {
+  const rows = state.tasks.map(task => {
+    const isActioned = !!state.actionedTasks[task.id];
+    const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
+    const campaignHtml = buildCampaignPill(task);
+    const name = [task.first_name, task.last_name].filter(Boolean).join(' ') || '';
+
+    if (isActioned) {
+      return `
+        <div class="revoke-row revoke-row-actioned">
+          <span class="revoke-name">${esc(name)}</span>
+          ${campaignHtml}
+          ${dueHtml}
+          <span class="actioned-inline">${esc(state.actionedTasks[task.id])}</span>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="revoke-row">
+        <span class="revoke-name">${esc(name)}</span>
+        ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank" title="${esc(task.profile_url)}">↗</a>` : ''}
+        ${campaignHtml}
+        ${dueHtml}
+        <span class="revoke-actions">
+          <button class="btn btn-revoke btn-xs" data-action="revoke" data-tid="${task.id}">Revoke</button>
+        </span>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="revoke-summary">${state.tasks.length} task${state.tasks.length !== 1 ? 's' : ''} due — go to <a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/" target="_blank" class="hint-link">https://www.linkedin.com/mynetwork/invitation-manager/sent/</a></div>
+    <div class="revoke-list">${rows}</div>
+  `;
 }
 
 // --- Queue mode ---
@@ -1068,24 +1102,14 @@ function el(id) { return document.getElementById(id); }
 // =============================================================================
 
 async function doLogin() {
-  const backendUrl = el('inp-backend')?.value?.trim();
+  const isProduction = el('chk-production')?.checked;
+  const backendUrl = isProduction ? 'https://backend.leadblocks.nl/' : 'http://localhost:1337';
   const email = el('inp-email')?.value?.trim();
   const password = el('inp-password')?.value;
   const errEl = el('login-error');
 
-  if (!backendUrl || !email || !password) {
+  if (!email || !password) {
     if (errEl) { errEl.textContent = 'Please fill in all fields.'; errEl.style.display = 'block'; }
-    return;
-  }
-
-  // Validate backend URL format
-  try {
-    const url = new URL(backendUrl);
-    if (!url.protocol.startsWith('http')) {
-      throw new Error('Invalid protocol');
-    }
-  } catch (e) {
-    if (errEl) { errEl.textContent = 'Please enter a valid HTTP/HTTPS URL for the backend.'; errEl.style.display = 'block'; }
     return;
   }
 

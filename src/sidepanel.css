@@ -208,6 +208,20 @@ input:focus, select:focus {
 
 input::placeholder { color: #9ca3af; }
 input[type="date"] { cursor: pointer; }
+input[type="checkbox"] {
+  width: auto;
+  margin-right: 8px;
+  cursor: pointer;
+}
+.checkbox-option {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: var(--foreground);
+}
+.checkbox-option span {
+  text-transform: none;
+}
 select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allowed; }
 
 /* ===== Buttons ===== */
@@ -784,4 +798,74 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
 .info-icon.info-icon-left::after {
   left: auto;
   right: calc(100% + 6px);
+}
+
+/* ===== Revoke List (compact line-by-line) ===== */
+.revoke-summary {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 8px 12px 4px;
+  font-weight: 500;
+}
+
+.revoke-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.revoke-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  min-height: 36px;
+}
+
+.revoke-row:hover {
+  background: var(--muted-bg);
+}
+
+.revoke-row-actioned {
+  opacity: 0.5;
+}
+
+.revoke-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.revoke-url {
+  color: var(--navy);
+  text-decoration: none;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.revoke-url:hover {
+  color: var(--primary);
+}
+
+.revoke-actions {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* ===== Hint links ===== */
+.hint-link {
+  color: var(--navy);
+  text-decoration: underline;
+  font-weight: 500;
+}
+
+.hint-link:hover {
+  color: var(--primary);
 }
