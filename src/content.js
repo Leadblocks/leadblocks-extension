@@ -52,8 +52,19 @@ window.addEventListener('popstate', sendUrl);
 })();
 
 // =============================================================================
-// HOVER DETECTION — extract prospect ID from LinkedIn "Message" button on hover
-// Reads <a> href attributes only; no DOM mutation, no clicks, no scrolling.
+// HOVER DETECTION — extract prospect ID / URL from LinkedIn profile interactions
+//
+// Three layers, in priority order:
+//   1. Messaging link (compose/thread URL) — contains fsd_profile URN directly
+//   2. MutationObserver on hover cards — LinkedIn inserts a card with a Message
+//      button whenever the user hovers a name; we scan that card immediately
+//   3. Any /in/ profile anchor hovered directly (name link, profile card link, …)
+//
+// All layers feed into one shared extraction function so priority is enforced
+// and there is a single debounce timer.
+//
+// Both pointer listeners use capture:true so they fire before any LinkedIn
+// handler that might call stopPropagation().
 // =============================================================================
 
 console.log('[Content] Content script loaded on:', window.location.href);
@@ -61,43 +72,123 @@ console.log('[Content] Content script loaded on:', window.location.href);
 (function initHoverDetection() {
   console.log('[Content] Initializing hover detection');
 
-  // Match the LinkedIn messaging compose link that contains a profileUrn with fsd_profile
-  const MSG_URN_RE = /[?&]profileUrn=urn(?:%3A|:)li(?:%3A|:)fsd_profile(?:%3A|:)([A-Za-z0-9_-]+)/i;
-  let lastSentId = '';
+  const MSG_URN_RE  = /[?&]profileUrn=urn(?:%3A|:)li(?:%3A|:)fsd_profile(?:%3A|:)([A-Za-z0-9_-]+)/i;
+  const LI_PROFILE_RE = /linkedin\.com\/in\/([^/?#\s]+)/i;
+
+  let lastSentId  = '';
+  let lastSentUrl = '';
   let debounceTimer = null;
 
-  document.addEventListener('mouseover', (e) => {
-    const anchor = e.target.closest('a[href]');
+  // ---------------------------------------------------------------------------
+  // Shared extraction — called by every layer below.
+  // Primary signal (profileUrn from message link) always wins over URL signal.
+  // ---------------------------------------------------------------------------
+  function tryExtractFromAnchor(anchor) {
     if (!anchor) return;
+    const href = anchor.href || '';
+    if (!href) return;
 
-    const href = anchor.href;
-    if (!href.includes('messaging/compose') && !href.includes('messaging/thread')) return;
+    // --- Primary: messaging link carries the fsd_profile URN ---
+    if (href.includes('messaging/compose') || href.includes('messaging/thread')) {
+      const match = href.match(MSG_URN_RE);
+      if (!match) return;
 
-    const match = href.match(MSG_URN_RE);
+      const prospectId = decodeURIComponent(match[1]);
+      if (prospectId === lastSentId) return;
+
+      const ariaLabel = anchor.getAttribute('aria-label') || '';
+      const nameMatch = ariaLabel.match(/(?:(?:send\s+a\s+message|message)\s+to|naar)\s+(.+?)(?:\s*,.*)?$/i);
+      const prospectName = nameMatch ? nameMatch[1].trim() : '';
+
+      console.log('[Hover] Prospect ID extracted:', prospectId, '| Name:', prospectName);
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (!chrome.runtime?.id) return;
+        try {
+          lastSentId  = prospectId;
+          lastSentUrl = ''; // primary wins — discard any pending URL signal
+          chrome.runtime.sendMessage({ type: 'HOVERED_PROSPECT_ID', prospectId, prospectName }).catch(() => {});
+          console.log('[Hover] Sent HOVERED_PROSPECT_ID:', prospectId, '| Name:', prospectName);
+        } catch (_) {}
+      }, 150);
+      return;
+    }
+
+    // --- Backup: any LinkedIn /in/ profile link ---
+    const match = href.match(LI_PROFILE_RE);
     if (!match) return;
 
-    const prospectId = decodeURIComponent(match[1]);
-
-    // Extract name from aria-label, e.g. "Een bericht verzenden naar Marco de Nooijer, MBA"
-    const ariaLabel = anchor.getAttribute('aria-label') || '';
-    const nameMatch = ariaLabel.match(/(?:(?:send\s+a\s+message|message)\s+to|naar)\s+(.+?)(?:\s*,.*)?$/i);
-    const prospectName = nameMatch ? nameMatch[1].trim() : '';
-
-    console.log('[Hover] Prospect ID extracted:', prospectId, '| Name:', prospectName);
-
-    if (prospectId === lastSentId) return;
+    const profileUrl = `https://www.linkedin.com/in/${match[1].toLowerCase()}/`;
+    if (profileUrl === lastSentUrl) return;
 
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       if (!chrome.runtime?.id) return;
       try {
-        lastSentId = prospectId;
-        chrome.runtime.sendMessage({ type: 'HOVERED_PROSPECT_ID', prospectId, prospectName }).catch(() => {});
-        console.log('[Hover] Sent HOVERED_PROSPECT_ID:', prospectId, '| Name:', prospectName);
-      } catch (_) {
-        // Context invalidated — silently ignore
-      }
+        lastSentUrl = profileUrl;
+        chrome.runtime.sendMessage({ type: 'HOVERED_PROSPECT_URL', profileUrl }).catch(() => {});
+        console.log('[Hover] Sent HOVERED_PROSPECT_URL:', profileUrl);
+      } catch (_) {}
     }, 150);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Layer 1 & 3 — capture-phase pointer events
+  // capture:true means we run BEFORE any LinkedIn stopPropagation() call.
+  // Both mouseover and pointerover are registered for broadest coverage.
+  // ---------------------------------------------------------------------------
+  function onPointerOver(e) {
+    tryExtractFromAnchor(e.target.closest('a[href]'));
+  }
+
+  document.addEventListener('mouseover',   onPointerOver, { capture: true });
+  document.addEventListener('pointerover', onPointerOver, { capture: true });
+
+  // ---------------------------------------------------------------------------
+  // Layer 2 — MutationObserver on hover cards
+  // When the user hovers a name, LinkedIn dynamically inserts a profile hover
+  // card containing a Message button. Scanning it on insertion gives us the
+  // profileUrn without depending on the card's internal DOM structure.
+  // ---------------------------------------------------------------------------
+  const cardObserver = new MutationObserver((mutations) => {
+    for (const mut of mutations) {
+      for (const node of mut.addedNodes) {
+        if (node.nodeType !== 1) continue; // elements only
+
+        // Collect all anchors inside the inserted node (and the node itself)
+        const anchors = node.querySelectorAll('a[href]');
+        for (const anchor of anchors) {
+          tryExtractFromAnchor(anchor);
+        }
+      }
+    }
+  });
+
+  const startCardObserver = () => {
+    const target = document.body || document.documentElement;
+    if (!target) return;
+    cardObserver.observe(target, { childList: true, subtree: true });
+    console.log('[Hover] Hover-card observer started');
+  };
+
+  // Reset lastSentId on navigation so a new prospect can be detected fresh
+  const resetOnNav = () => { lastSentId = ''; lastSentUrl = ''; };
+  window.addEventListener('popstate', resetOnNav);
+  const _origPush = history.pushState.bind(history);
+  history.pushState = function (...args) { _origPush(...args); resetOnNav(); };
+
+  if (document.body) startCardObserver();
+  else document.addEventListener('DOMContentLoaded', startCardObserver);
+
+  // Allow the sidepanel to reset dedup state when the user clears the prospect
+  // field — so the same person can be re-detected without a page navigation.
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'RESET_HOVER_STATE') {
+      lastSentId  = '';
+      lastSentUrl = '';
+      clearTimeout(debounceTimer);
+      console.log('[Hover] State reset by sidepanel');
+    }
   });
 })();
 

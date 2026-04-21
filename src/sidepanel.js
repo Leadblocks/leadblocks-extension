@@ -13,7 +13,7 @@ const STEPS = [
 const state = {
   // Auth
   token: null,
-  backendUrl: 'https://backend.leadblocks.nl',
+  backendUrl: 'https://backend.leadblocks.nl/',
 
   // Current step
   currentStep: 0,
@@ -29,12 +29,14 @@ const state = {
   pendingCampaignId: '',
   pendingProspectId: '',
   pendingProspectName: '',
+  pendingProspectUrl: '',   // backup: LinkedIn profile URL from hovering the person's name
   pendingLinkedInSearch: '',
 
   // Applied (active) filters
   appliedProfileId: '',
   appliedCampaignId: '',
   appliedProspectId: '',
+  appliedProspectUrl: '',   // backup: LinkedIn profile URL used when no prospectId was detected
   appliedLinkedInSearch: '',
 
   // Queue
@@ -147,7 +149,7 @@ function loadStoredAuth() {
       if (data.token) state.token = data.token;
       // Only update backendUrl if we have a stored value, otherwise keep default
       if (data.backendUrl && typeof data.backendUrl === 'string' && data.backendUrl.trim()) {
-        state.backendUrl = data.backendUrl.trim().replace(/\/+$/, '');
+        state.backendUrl = data.backendUrl.trim();
       }
       console.log('[Auth] State after loading:', { backendUrl: state.backendUrl, token: !!state.token });
       resolve();
@@ -239,7 +241,33 @@ async function loadAllTasks() {
       if (state.appliedLinkedInSearch) params.append('profileUrlSearch', state.appliedLinkedInSearch);
 
       const result = await apiGet(`/api/extension/revoke-tasks?${params.toString()}`);
-      all = result.data || [];
+      // Only show tasks with due_date today or in the past
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      all = (result.data || []).filter(t => {
+        if (!t.due_date) return true;
+        return new Date(t.due_date) <= today;
+      });
+    } else {
+      // Default: paginated fetch from all-robot-tasks
+      let page = 1;
+      const pageSize = 50;
+
+      while (true) {
+        const params = new URLSearchParams();
+        params.append('page', String(page));
+        params.append('pageSize', String(pageSize));
+        params.append('profileIds', state.appliedProfileId);
+        params.append('dataTypes', 'Connection Details');
+        params.append('dataTypes', 'Revoke connection request');
+        if (state.appliedLinkedInSearch) params.append('profileUrlSearch', state.appliedLinkedInSearch);
+        if (state.appliedCampaignId) params.append('campaignIds', state.appliedCampaignId);
+
+        const result = await apiGet(`/api/all-robot-tasks?${params.toString()}`);
+        all = all.concat(result.data || []);
+        if (all.length >= (result.meta?.pagination?.total || 0)) break;
+        page++;
+      }
     }
 
     state.tasks = all;
@@ -265,7 +293,12 @@ async function lookupConnection() {
   try {
     const params = new URLSearchParams();
     params.append('profileId', state.appliedProfileId);
-    params.append('prospectId', state.appliedProspectId);
+    if (state.appliedProspectId) {
+      params.append('prospectId', state.appliedProspectId);
+    } else if (state.appliedProspectUrl) {
+      // Backup: look up by LinkedIn profile URL (extracted from hovering the name)
+      params.append('profileUrl', state.appliedProspectUrl);
+    }
 
     const result = await apiGet(`/api/extension/connection-acceptance?${params.toString()}`);
     state.acceptanceResult = result;
@@ -301,7 +334,6 @@ async function handleConnect(taskId) {
   try {
     await apiPost('/api/data-senders/connect', {
       ...task,
-      revoke_task_id: task.id,
       email: contact.email || '',
       phone: contact.phone || '',
       birthday: contact.birthday || '',
@@ -378,13 +410,18 @@ async function handleFirstConnectionConnect() {
   }
 
   try {
-    const prospectId = state.appliedProspectId;
-    console.log('[FirstConnection] Connecting with prospectId:', prospectId);
+    // Use the prospect_id from the applied filter; if missing (URL-backup path),
+    // fall back to the id resolved by the backend and returned in the result.
+    const prospectId = state.appliedProspectId || state.acceptanceResult?.prospect?.prospect_id || '';
+    // Pass the profile URL so the backend can derive a synthetic prospect_id
+    // and store the linkedin_url on the prospect record when no real URN is available.
+    const profileUrl = state.acceptanceResult?.profileUrl || state.appliedProspectUrl || '';
+    console.log('[FirstConnection] Connecting with prospectId:', prospectId, '| profileUrl:', profileUrl);
 
     await apiPost('/api/extension/connection-acceptance/first-connection', {
       profileId: state.appliedProfileId,
       prospectId,
-      prospect_name: state.pendingProspectName || '',
+      profileUrl,
       email: contact.email || '',
       phone: contact.phone || '',
       birthday: contact.birthday || '',
@@ -413,7 +450,7 @@ function render() {
 // --- Login ---
 
 function buildLogin() {
-  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl';
+  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl/';
   return `
     <div class="header">
       <img src="../assets/logo.png" alt="Leadblocks" class="logo" />
@@ -428,8 +465,8 @@ function buildLogin() {
         </div>
       </div>
       <div class="field">
-        <label>Username</label>
-        <input type="text" id="inp-email" placeholder="username" autocomplete="username" />
+        <label>Email</label>
+        <input type="email" id="inp-email" placeholder="user@example.com" autocomplete="email" />
       </div>
       <div class="field">
         <label>Password</label>
@@ -487,11 +524,12 @@ function buildFilters() {
     state.pendingProfileId !== state.appliedProfileId ||
     state.pendingCampaignId !== state.appliedCampaignId ||
     state.pendingProspectId !== state.appliedProspectId ||
+    state.pendingProspectUrl !== state.appliedProspectUrl ||
     state.pendingLinkedInSearch !== state.appliedLinkedInSearch;
 
-  // For connection acceptance, require a prospect ID; for other steps, require a profile
+  // For connection acceptance, require a prospect ID or URL; for other steps, require a profile
   const canApply = isAcceptance
-    ? state.pendingProfileId && state.pendingProspectId.trim() !== ''
+    ? state.pendingProfileId && (state.pendingProspectId.trim() !== '' || state.pendingProspectUrl.trim() !== '')
     : state.pendingProfileId && filtersChanged;
 
   const customerOptions = state.customers
@@ -527,10 +565,12 @@ function buildFilters() {
       ${isAcceptance ? `
       <div class="filter-row">
         <div class="filter-field" style="flex:1">
-          <label>Prospect <span class="info-icon" data-tooltip="Hover the Bericht button on a LinkedIn profile to auto-fill">i</span></label>
+          <label>Prospect <span class="info-icon" data-tooltip="Hover the Bericht/Message button to auto-fill. If hover doesn't work, hover the person's name link. As a last resort, paste the LinkedIn profile URL directly.">i</span></label>
           <div class="prospect-input-row">
-            <input type="text" id="inp-prospect-id" value="${esc(state.pendingProspectName || state.pendingProspectId)}" placeholder="Hover the Bericht button to auto-fill..." readonly />
-            ${state.pendingProspectId ? `<button id="btn-clear-prospect" class="btn-clear" title="Clear">&times;</button>` : ''}
+            <input type="text" id="inp-prospect-id"
+              value="${esc(state.pendingProspectName || state.pendingProspectId || state.pendingProspectUrl)}"
+              placeholder="Hover Bericht button, hover name, or paste LinkedIn URL…" />
+            ${(state.pendingProspectId || state.pendingProspectUrl) ? `<button id="btn-clear-prospect" class="btn-clear" title="Clear">&times;</button>` : ''}
           </div>
         </div>
       </div>
@@ -586,11 +626,6 @@ function buildTaskArea() {
     return `<div class="empty-state">No tasks found.</div>`;
   }
 
-  // Revoke step: always show compact list for fast bulk revoking
-  if (step.key === 'revoke_connection_request') {
-    return buildRevokeList();
-  }
-
   return `${buildQueueMode()}`;
 }
 
@@ -601,7 +636,7 @@ function buildConnectionAcceptanceArea() {
 
   // No lookup performed yet
   if (!r) {
-    return `<div class="empty-state">Go to <a href="https://www.linkedin.com/mynetwork/invite-connect/connections/" target="_blank" class="hint-link">https://www.linkedin.com/mynetwork/invite-connect/connections/</a> and hover over the <strong>Bericht</strong> button for the prospect that connected. The prospect filter will be filled, then press Filter.</div>`;
+    return `<div class="empty-state">Go to <a href="https://www.linkedin.com/mynetwork/invite-connect/connections/" target="_blank" class="hint-link">your connections page</a> and hover over the <strong>Bericht</strong> button for the prospect that connected. The prospect filter will be filled, then press Filter. If the button isn't detected, hover their <strong>name</strong> instead, or paste the LinkedIn URL directly.</div>`;
   }
 
   // Already actioned in this session
@@ -611,7 +646,7 @@ function buildConnectionAcceptanceArea() {
       <div class="success-card">
         <div class="success-icon">✓</div>
         <div class="success-title">${esc(label.charAt(0).toUpperCase() + label.slice(1))}</div>
-        <div class="success-hint">Hover over the next Bericht button and press Filter again.</div>
+        <div class="success-hint">Hover over the next <strong>Bericht</strong> button (or their name) and press Filter again.</div>
       </div>
     `;
   }
@@ -655,29 +690,22 @@ function buildConnectionAcceptanceArea() {
 
         <div class="task-actions">
           <button class="btn btn-primary btn-sm" data-action="connect" data-tid="${task.id}">Connect</button>
+          <button class="btn btn-revoke btn-sm" data-action="revoke" data-tid="${task.id}">Revoke</button>
           <button class="btn btn-danger btn-sm" data-action="disconnect" data-tid="${task.id}">Disconnect</button>
         </div>
       </div>
     `;
   }
 
-  // status: 'already_connected' — task was closed, no action needed
-  if (r.status === 'already_connected') {
+  // status: 'already_connected' or 'already_first_connected' — no action needed
+  if (r.status === 'already_connected' || r.status === 'already_first_connected') {
+    const msg = r.status === 'already_first_connected'
+      ? 'Already registered as a first connection.'
+      : 'This prospect was already processed. No action needed.';
     return `
       <div class="empty-state" style="padding:24px 0">
         <strong>Already connected</strong><br><br>
-        This prospect was already processed. No action needed.<br>
-        Hover over the next Bericht button and press Filter.
-      </div>
-    `;
-  }
-
-  // status: 'already_first_connected' — first connection already processed
-  if (r.status === 'already_first_connected') {
-    return `
-      <div class="empty-state" style="padding:24px 0">
-        <strong>Already first connected</strong><br><br>
-        This prospect was already processed as a first connection. No action needed.<br>
+        ${msg}<br>
         Hover over the next Bericht button and press Filter.
       </div>
     `;
@@ -730,50 +758,6 @@ function buildConnectionAcceptanceArea() {
 
   // Fallback
   return `<div class="empty-state">No result. Hover over the Bericht button and press Filter.</div>`;
-}
-
-// --- Revoke list (compact line-by-line) ---
-
-function buildRevokeList() {
-  const rows = state.tasks.map(task => {
-    const isActioned = !!state.actionedTasks[task.id];
-    const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
-    const campaignHtml = buildCampaignPill(task);
-    if (isActioned) {
-      return `
-        <div class="revoke-row revoke-row-actioned">
-          <div class="revoke-line1">
-            ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank">${esc(task.profile_url)}</a>` : ''}
-            ${dueHtml}
-          </div>
-          <div class="revoke-line2">
-            ${campaignHtml}
-            <span class="actioned-inline">${esc(state.actionedTasks[task.id])}</span>
-          </div>
-        </div>
-      `;
-    }
-
-    return `
-      <div class="revoke-row">
-        <div class="revoke-line1">
-          ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank">${esc(task.profile_url)}</a>` : ''}
-          ${dueHtml}
-        </div>
-        <div class="revoke-line2">
-          ${campaignHtml}
-          <span class="revoke-actions">
-            <button class="btn btn-revoke btn-xs" data-action="revoke" data-tid="${task.id}">Revoke</button>
-          </span>
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  return `
-    <div class="revoke-summary">${state.tasks.length} task${state.tasks.length !== 1 ? 's' : ''} due — go to <a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/" target="_blank" class="hint-link">https://www.linkedin.com/mynetwork/invitation-manager/sent/</a></div>
-    <div class="revoke-list">${rows}</div>
-  `;
 }
 
 // --- Queue mode ---
@@ -1030,6 +1014,37 @@ function attachListeners() {
     render(); // re-render to update Apply button enabled state
   });
 
+  el('inp-prospect-id')?.addEventListener('input', e => {
+    const input = e.target;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const wasFocused = document.activeElement === input;
+    const raw = input.value.trim();
+
+    // Try to parse as a LinkedIn profile URL
+    const liMatch = raw.match(/linkedin\.com\/in\/([^/?#\s]+)/i);
+    if (liMatch) {
+      state.pendingProspectUrl = `https://www.linkedin.com/in/${liMatch[1].toLowerCase()}/`;
+      state.pendingProspectId  = '';
+      state.pendingProspectName = '';
+    } else if (raw === '') {
+      state.pendingProspectUrl  = '';
+      state.pendingProspectId   = '';
+      state.pendingProspectName = '';
+    }
+    // Non-URL free text: keep whatever the user typed but don't override hover state
+
+    render();
+    if (wasFocused) {
+      const newInput = document.getElementById('inp-prospect-id');
+      if (newInput) {
+        newInput.focus();
+        // Restore cursor only when we didn't transform the value
+        if (!liMatch) newInput.setSelectionRange(start, end);
+      }
+    }
+  });
+
   el('inp-linkedin')?.addEventListener('input', e => {
     const input = e.target;
     const start = input.selectionStart;
@@ -1049,6 +1064,13 @@ function attachListeners() {
   el('btn-clear-prospect')?.addEventListener('click', () => {
     state.pendingProspectId = '';
     state.pendingProspectName = '';
+    state.pendingProspectUrl = '';
+    // Reset content script dedup state so the same person can be re-detected
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      if (tabs[0]?.id) {
+        chrome.tabs.sendMessage(tabs[0].id, { type: 'RESET_HOVER_STATE' }).catch(() => {});
+      }
+    });
     render();
   });
 
@@ -1056,6 +1078,7 @@ function attachListeners() {
     state.appliedProfileId = state.pendingProfileId;
     state.appliedCampaignId = state.pendingCampaignId;
     state.appliedProspectId = state.pendingProspectId;
+    state.appliedProspectUrl = state.pendingProspectUrl;
     state.appliedLinkedInSearch = state.pendingLinkedInSearch;
 
     const step = STEPS[state.currentStep];
@@ -1076,6 +1099,8 @@ function attachListeners() {
     state.pendingCampaignId = '';
     state.pendingProspectId = '';
     state.pendingProspectName = '';
+    state.pendingProspectUrl = '';
+    state.appliedProspectUrl = '';
     state.pendingLinkedInSearch = '';
     state.acceptanceResult = null;
     render();
@@ -1108,7 +1133,7 @@ function el(id) { return document.getElementById(id); }
 
 async function doLogin() {
   const isProduction = el('chk-production')?.checked;
-  const backendUrl = isProduction ? 'https://backend.leadblocks.nl' : 'http://localhost:1337';
+  const backendUrl = isProduction ? 'https://backend.leadblocks.nl/' : 'http://localhost:1337';
   const email = el('inp-email')?.value?.trim();
   const password = el('inp-password')?.value;
   const errEl = el('login-error');
@@ -1147,8 +1172,13 @@ async function doLogout() {
     pendingProfileId: '',
     pendingCampaignId: '',
     pendingLinkedInSearch: '',
+    pendingProspectId: '',
+    pendingProspectName: '',
+    pendingProspectUrl: '',
     appliedProfileId: '',
     appliedCampaignId: '',
+    appliedProspectId: '',
+    appliedProspectUrl: '',
     appliedLinkedInSearch: '',
     actionedTasks: {},
     contactDetails: {},
@@ -1227,7 +1257,7 @@ chrome.runtime.onMessage.addListener(message => {
     }
   }
 
-  // Hover detection — auto-fill prospect ID filter on step 1
+  // Hover detection — primary: auto-fill prospect ID from Message button
   if (message.type === 'HOVERED_PROSPECT_ID') {
     console.log('[Sidepanel] Received HOVERED_PROSPECT_ID:', message.prospectId);
     const step = STEPS[state.currentStep];
@@ -1237,6 +1267,24 @@ chrome.runtime.onMessage.addListener(message => {
     if (id === state.pendingProspectId) return;
     state.pendingProspectId = id;
     state.pendingProspectName = message.prospectName || '';
+    // Primary signal wins — clear any pending URL backup
+    state.pendingProspectUrl = '';
+    render();
+  }
+
+  // Hover detection — backup: auto-fill prospect URL from hovering the person's name
+  if (message.type === 'HOVERED_PROSPECT_URL') {
+    console.log('[Sidepanel] Received HOVERED_PROSPECT_URL:', message.profileUrl);
+    const step = STEPS[state.currentStep];
+    if (state.view !== 'main' || step.key !== 'connection_acceptance') return;
+
+    // Only use URL backup when the primary prospect ID is not yet known
+    if (state.pendingProspectId) return;
+
+    const url = message.profileUrl || '';
+    if (url === state.pendingProspectUrl) return;
+    state.pendingProspectUrl = url;
+    state.pendingProspectName = '';
     render();
   }
 
