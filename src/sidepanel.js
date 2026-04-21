@@ -626,6 +626,11 @@ function buildTaskArea() {
     return `<div class="empty-state">No tasks found.</div>`;
   }
 
+  // Revoke step uses compact list view
+  if (step.key === 'revoke_connection_request') {
+    return buildRevokeList();
+  }
+
   return `${buildQueueMode()}`;
 }
 
@@ -758,6 +763,50 @@ function buildConnectionAcceptanceArea() {
 
   // Fallback
   return `<div class="empty-state">No result. Hover over the Bericht button and press Filter.</div>`;
+}
+
+// --- Revoke list (compact line-by-line) ---
+
+function buildRevokeList() {
+  const rows = state.tasks.map(task => {
+    const isActioned = !!state.actionedTasks[task.id];
+    const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
+    const campaignHtml = buildCampaignPill(task);
+    if (isActioned) {
+      return `
+        <div class="revoke-row revoke-row-actioned">
+          <div class="revoke-line1">
+            ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank">${esc(task.profile_url)}</a>` : ''}
+            ${dueHtml}
+          </div>
+          <div class="revoke-line2">
+            ${campaignHtml}
+            <span class="actioned-inline">${esc(state.actionedTasks[task.id])}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="revoke-row">
+        <div class="revoke-line1">
+          ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" target="_blank">${esc(task.profile_url)}</a>` : ''}
+          ${dueHtml}
+        </div>
+        <div class="revoke-line2">
+          ${campaignHtml}
+          <span class="revoke-actions">
+            <button class="btn btn-revoke btn-xs" data-action="revoke" data-tid="${task.id}">Revoke</button>
+          </span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="revoke-summary">${state.tasks.length} task${state.tasks.length !== 1 ? 's' : ''} due — go to <a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/" target="_blank" class="hint-link">https://www.linkedin.com/mynetwork/invitation-manager/sent/</a></div>
+    <div class="revoke-list">${rows}</div>
+  `;
 }
 
 // --- Queue mode ---
