@@ -13,7 +13,7 @@ const STEPS = [
 const state = {
   // Auth
   token: null,
-  backendUrl: 'https://backend.leadblocks.nl/',
+  backendUrl: 'https://backend.leadblocks.nl',
 
   // Current step
   currentStep: 0,
@@ -450,7 +450,7 @@ function render() {
 // --- Login ---
 
 function buildLogin() {
-  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl/';
+  const isProduction = state.backendUrl === 'https://backend.leadblocks.nl';
   return `
     <div class="header">
       <img src="../assets/logo.png" alt="Leadblocks" class="logo" />
@@ -1133,7 +1133,7 @@ function el(id) { return document.getElementById(id); }
 
 async function doLogin() {
   const isProduction = el('chk-production')?.checked;
-  const backendUrl = isProduction ? 'https://backend.leadblocks.nl/' : 'http://localhost:1337';
+  const backendUrl = isProduction ? 'https://backend.leadblocks.nl' : 'http://localhost:1337';
   const email = el('inp-email')?.value?.trim();
   const password = el('inp-password')?.value;
   const errEl = el('login-error');
