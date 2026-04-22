@@ -5,7 +5,7 @@
 const STEPS = [
   { key: 'connection_acceptance', label: 'Connection Acceptance', enabled: true },
   { key: 'messaging', label: 'Messaging', enabled: false },
-  { key: 'connection_request', label: 'Connection Request', enabled: false },
+  { key: 'connection_request', label: 'Connection Request', enabled: true },
   { key: 'follow_up', label: 'Follow-Up', enabled: false },
   { key: 'revoke_connection_request', label: 'Revoke Connection Request', enabled: true },
 ];
@@ -14,6 +14,7 @@ const state = {
   // Auth
   token: null,
   backendUrl: 'https://backend.leadblocks.nl',
+  userName: '',          // logged-in user's display name
 
   // Current step
   currentStep: 0,
@@ -144,9 +145,10 @@ async function apiPost(path, body) {
 
 function loadStoredAuth() {
   return new Promise(resolve => {
-    chrome.storage.local.get(['token', 'backendUrl'], data => {
+    chrome.storage.local.get(['token', 'backendUrl', 'userName'], data => {
       console.log('[Auth] Loaded from storage:', { token: !!data.token, backendUrl: data.backendUrl });
       if (data.token) state.token = data.token;
+      if (data.userName) state.userName = data.userName;
       // Only update backendUrl if we have a stored value, otherwise keep default
       if (data.backendUrl && typeof data.backendUrl === 'string' && data.backendUrl.trim()) {
         state.backendUrl = data.backendUrl.trim();
@@ -157,12 +159,12 @@ function loadStoredAuth() {
   });
 }
 
-function saveAuth(token, backendUrl) {
-  return new Promise(resolve => chrome.storage.local.set({ token, backendUrl }, resolve));
+function saveAuth(token, backendUrl, userName) {
+  return new Promise(resolve => chrome.storage.local.set({ token, backendUrl, userName }, resolve));
 }
 
 function clearAuth() {
-  return new Promise(resolve => chrome.storage.local.remove(['token', 'backendUrl'], resolve));
+  return new Promise(resolve => chrome.storage.local.remove(['token', 'backendUrl', 'userName'], resolve));
 }
 
 // =============================================================================
@@ -248,6 +250,15 @@ async function loadAllTasks() {
         if (!t.due_date) return true;
         return new Date(t.due_date) <= today;
       });
+    } else if (step.key === 'connection_request') {
+      // Use dedicated extension endpoint for Connection Request tasks
+      const params = new URLSearchParams();
+      if (state.appliedProfileId) params.append('profileId', state.appliedProfileId);
+      if (state.appliedCampaignId) params.append('campaignId', state.appliedCampaignId);
+      if (state.appliedLinkedInSearch) params.append('profileUrlSearch', state.appliedLinkedInSearch);
+
+      const result = await apiGet(`/api/extension/connection-request-tasks?${params.toString()}`);
+      all = result.data || [];
     } else {
       // Default: paginated fetch from all-robot-tasks
       let page = 1;
@@ -346,6 +357,19 @@ async function handleConnect(taskId) {
     } else {
       render();
     }
+  } catch (err) {
+    showToast('Error: ' + err.message, 'error');
+  }
+}
+
+async function handleConnectionRequest(taskId) {
+  const task = state.tasks.find(t => String(t.id) === String(taskId));
+  if (!task) return;
+  try {
+    await apiPost('/api/data-senders/connection_request', task);
+    state.actionedTasks[taskId] = 'sent';
+    showToast('Connection request sent!', 'success');
+    render();
   } catch (err) {
     showToast('Error: ' + err.message, 'error');
   }
@@ -484,7 +508,10 @@ function buildMain() {
   return `
     <div class="header">
       <img src="../assets/logo.png" alt="Leadblocks" class="logo" />
-      <button id="btn-logout" class="btn-link">Logout</button>
+      <div class="header-user">
+        ${state.userName ? `<span class="header-username">${esc(state.userName)}</span>` : ''}
+        <button id="btn-logout" class="btn-link">Logout</button>
+      </div>
     </div>
     ${buildSteps()}
     ${buildFilters()}
@@ -631,6 +658,11 @@ function buildTaskArea() {
     return buildRevokeList();
   }
 
+  // Connection Request step uses compact list view
+  if (step.key === 'connection_request') {
+    return buildConnectionRequestList();
+  }
+
   return `${buildQueueMode()}`;
 }
 
@@ -763,6 +795,67 @@ function buildConnectionAcceptanceArea() {
 
   // Fallback
   return `<div class="empty-state">No result. Hover over the Bericht button and press Filter.</div>`;
+}
+
+// --- Connection Request list ---
+
+function buildConnectionRequestList() {
+  const rows = state.tasks.map(task => {
+    const isActioned = !!state.actionedTasks[task.id];
+    const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
+    const campaignHtml = buildCampaignPill(task);
+    const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
+
+    const isActive = !isActioned && task.profile_url && urlMatches(task.profile_url, state.currentTabUrl);
+
+    if (isActioned) {
+      return `
+        <div class="revoke-row revoke-row-actioned">
+          <div class="revoke-line1">
+            ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" data-cr-nav="${esc(task.profile_url)}">${esc(task.profile_url)}</a>` : ''}
+            ${dueHtml}
+          </div>
+          <div class="revoke-line2">
+            ${campaignHtml}
+            <span class="actioned-inline">sent</span>
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="revoke-row${isActive ? ' cr-row-active' : ''}">
+        <div class="revoke-line1">
+          ${task.profile_url
+            ? `<a href="${esc(task.profile_url)}" class="revoke-url" data-cr-nav="${esc(task.profile_url)}">${esc(task.profile_url)}</a>`
+            : `<span class="revoke-url muted">${name || 'Unknown prospect'}</span>`}
+          ${dueHtml}
+        </div>
+        <div class="revoke-line2">
+          ${campaignHtml}
+          <span class="revoke-actions">
+            <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="connection_request" data-tid="${task.id}"${!isActive ? ' disabled title="Navigate to this profile to enable the Send button"' : ''}>Send</button>
+          </span>
+        </div>
+        ${task.content ? `
+        <div class="cr-content-wrap">
+          <button class="cr-copy-btn" data-copy="${esc(task.content)}" title="Copy message">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            Copy
+          </button>
+          <div class="cr-content">${esc(task.content)}</div>
+        </div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="revoke-summary">${state.tasks.length} Connection Request task${state.tasks.length !== 1 ? 's' : ''} due</div>
+    <div class="revoke-list">${rows}</div>
+  `;
 }
 
 // --- Revoke list (compact line-by-line) ---
@@ -1001,14 +1094,42 @@ function setupGlobalDelegation() {
       return;
     }
 
+    // Navigate active tab to CR profile URL (same tab, no new tab)
+    const navLink = e.target.closest('[data-cr-nav]');
+    if (navLink) {
+      e.preventDefault();
+      const url = navLink.dataset.crNav;
+      chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+        if (tabs[0]) chrome.tabs.update(tabs[0].id, { url });
+      });
+      return;
+    }
+
+    // Copy connection request content
+    const copyBtn = e.target.closest('.cr-copy-btn');
+    if (copyBtn) {
+      const text = copyBtn.dataset.copy;
+      navigator.clipboard.writeText(text).then(() => {
+        copyBtn.classList.add('copied');
+        const original = copyBtn.innerHTML;
+        copyBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Copied!`;
+        setTimeout(() => {
+          copyBtn.classList.remove('copied');
+          copyBtn.innerHTML = original;
+        }, 2000);
+      });
+      return;
+    }
+
     // Task action buttons
     const actionBtn = e.target.closest('[data-action]');
     if (actionBtn) {
       const tid = actionBtn.dataset.tid;
       switch (actionBtn.dataset.action) {
-        case 'connect':    handleConnect(tid); break;
-        case 'revoke':     handleRevoke(tid); break;
-        case 'disconnect': handleDisconnect(tid); break;
+        case 'connect':              handleConnect(tid); break;
+        case 'revoke':               handleRevoke(tid); break;
+        case 'disconnect':           handleDisconnect(tid); break;
+        case 'connection_request':   handleConnectionRequest(tid); break;
         case 'skip':
           state.currentIndex = Math.min(state.currentIndex + 1, state.tasks.length - 1);
           render();
@@ -1199,8 +1320,9 @@ async function doLogin() {
     const data = await loginRequest(backendUrl, email, password);
     state.token = data.jwt;
     state.backendUrl = backendUrl;
+    state.userName = data.user?.username || data.user?.email || '';
     console.log('[Auth] Set backendUrl to:', state.backendUrl);
-    await saveAuth(data.jwt, backendUrl);
+    await saveAuth(data.jwt, backendUrl, state.userName);
     await bootMainView();
   } catch (err) {
     if (errEl) { errEl.textContent = err.message; errEl.style.display = 'block'; }
@@ -1291,6 +1413,14 @@ chrome.runtime.onMessage.addListener(message => {
     const newUrl = message.url || '';
     if (newUrl === state.currentTabUrl) return;
     state.currentTabUrl = newUrl;
+
+    const step = STEPS[state.currentStep];
+
+    // Connection Request step: full re-render to highlight the matching row
+    if (state.view === 'main' && step.key === 'connection_request' && !state.loading && state.tasks.length > 0) {
+      render();
+      return;
+    }
 
     // Lightweight update: only refresh the url-status element in queue mode
     if (state.view === 'main' && state.viewMode === 'queue' && !state.loading && state.tasks.length > 0) {
