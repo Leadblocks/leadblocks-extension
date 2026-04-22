@@ -6,7 +6,7 @@ const STEPS = [
   { key: 'connection_acceptance', label: 'Connection Acceptance', enabled: true },
   { key: 'messaging', label: 'Messaging', enabled: false },
   { key: 'connection_request', label: 'Connection Request', enabled: true },
-  { key: 'follow_up', label: 'Follow-Up', enabled: false },
+  { key: 'follow_up', label: 'Follow-Up', enabled: true },
   { key: 'revoke_connection_request', label: 'Revoke Connection Request', enabled: true },
 ];
 
@@ -259,6 +259,15 @@ async function loadAllTasks() {
 
       const result = await apiGet(`/api/extension/connection-request-tasks?${params.toString()}`);
       all = result.data || [];
+    } else if (step.key === 'follow_up') {
+      // Use dedicated extension endpoint for Follow-Up tasks
+      const params = new URLSearchParams();
+      if (state.appliedProfileId) params.append('profileId', state.appliedProfileId);
+      if (state.appliedCampaignId) params.append('campaignId', state.appliedCampaignId);
+      if (state.appliedLinkedInSearch) params.append('profileUrlSearch', state.appliedLinkedInSearch);
+
+      const result = await apiGet(`/api/extension/follow-up-tasks?${params.toString()}`);
+      all = result.data || [];
     } else {
       // Default: paginated fetch from all-robot-tasks
       let page = 1;
@@ -369,6 +378,19 @@ async function handleConnectionRequest(taskId) {
     await apiPost('/api/data-senders/connection_request', task);
     state.actionedTasks[taskId] = 'sent';
     showToast('Connection request sent!', 'success');
+    render();
+  } catch (err) {
+    showToast('Error: ' + err.message, 'error');
+  }
+}
+
+async function handleFollowUp(taskId) {
+  const task = state.tasks.find(t => String(t.id) === String(taskId));
+  if (!task) return;
+  try {
+    await apiPost('/api/extension/follow-up', task);
+    state.actionedTasks[taskId] = 'sent';
+    showToast('Follow-up sent!', 'success');
     render();
   } catch (err) {
     showToast('Error: ' + err.message, 'error');
@@ -663,6 +685,11 @@ function buildTaskArea() {
     return buildConnectionRequestList();
   }
 
+  // Follow-Up step uses compact list view
+  if (step.key === 'follow_up') {
+    return buildFollowUpList();
+  }
+
   return `${buildQueueMode()}`;
 }
 
@@ -854,6 +881,77 @@ function buildConnectionRequestList() {
 
   return `
     <div class="revoke-summary">${state.tasks.length} Connection Request task${state.tasks.length !== 1 ? 's' : ''} due</div>
+    <div class="revoke-list">${rows}</div>
+  `;
+}
+
+// --- Follow-Up list ---
+
+function getFollowUpLabel(dataType) {
+  const numMatch = dataType && dataType.match(/(\d)/);
+  const num = numMatch ? numMatch[1] : '?';
+  const isMessenger = dataType && dataType.includes('messenger');
+  return `FU${num}${isMessenger ? ' (Msg)' : ''}`;
+}
+
+function buildFollowUpList() {
+  const rows = state.tasks.map(task => {
+    const isActioned = !!state.actionedTasks[task.id];
+    const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
+    const campaignHtml = buildCampaignPill(task);
+    const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
+    const fuLabel = getFollowUpLabel(task.data_type);
+
+    const isActive = !isActioned && task.profile_url && urlMatches(task.profile_url, state.currentTabUrl);
+
+    if (isActioned) {
+      return `
+        <div class="revoke-row revoke-row-actioned">
+          <div class="revoke-line1">
+            ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="revoke-url" data-cr-nav="${esc(task.profile_url)}">${esc(task.profile_url)}</a>` : ''}
+            <span class="badge badge-fu">${esc(fuLabel)}</span>
+            ${dueHtml}
+          </div>
+          <div class="revoke-line2">
+            ${campaignHtml}
+            <span class="actioned-inline">sent</span>
+          </div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="revoke-row${isActive ? ' cr-row-active' : ''}">
+        <div class="revoke-line1">
+          ${task.profile_url
+            ? `<a href="${esc(task.profile_url)}" class="revoke-url" data-cr-nav="${esc(task.profile_url)}">${esc(task.profile_url)}</a>`
+            : `<span class="revoke-url muted">${name || 'Unknown prospect'}</span>`}
+          <span class="badge badge-fu">${esc(fuLabel)}</span>
+          ${dueHtml}
+        </div>
+        <div class="revoke-line2">
+          ${campaignHtml}
+          <span class="revoke-actions">
+            <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="follow_up" data-tid="${task.id}"${!isActive ? ' disabled title="Navigate to this profile to enable the Send button"' : ''}>Send</button>
+          </span>
+        </div>
+        ${task.content ? `
+        <div class="cr-content-wrap">
+          <button class="cr-copy-btn" data-copy="${esc(task.content)}" title="Copy message">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            Copy
+          </button>
+          <div class="cr-content">${esc(task.content)}</div>
+        </div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="revoke-summary">${state.tasks.length} Follow-Up task${state.tasks.length !== 1 ? 's' : ''} due</div>
     <div class="revoke-list">${rows}</div>
   `;
 }
@@ -1082,7 +1180,14 @@ function setupGlobalDelegation() {
     const stepBtn = e.target.closest('.step[data-step]');
     if (stepBtn && !stepBtn.disabled) {
       state.currentStep = parseInt(stepBtn.dataset.step, 10);
-      render();
+      const newStep = STEPS[state.currentStep];
+      // Auto-load tasks for the new step using the already-applied filters,
+      // so the user doesn't have to press Apply again after switching steps.
+      if (newStep.key !== 'connection_acceptance' && newStep.enabled && state.appliedProfileId) {
+        loadAllTasks();
+      } else {
+        render();
+      }
       return;
     }
 
@@ -1130,6 +1235,7 @@ function setupGlobalDelegation() {
         case 'revoke':               handleRevoke(tid); break;
         case 'disconnect':           handleDisconnect(tid); break;
         case 'connection_request':   handleConnectionRequest(tid); break;
+        case 'follow_up':             handleFollowUp(tid); break;
         case 'skip':
           state.currentIndex = Math.min(state.currentIndex + 1, state.tasks.length - 1);
           render();
@@ -1416,8 +1522,8 @@ chrome.runtime.onMessage.addListener(message => {
 
     const step = STEPS[state.currentStep];
 
-    // Connection Request step: full re-render to highlight the matching row
-    if (state.view === 'main' && step.key === 'connection_request' && !state.loading && state.tasks.length > 0) {
+    // Connection Request / Follow-Up step: full re-render to highlight the matching row
+    if (state.view === 'main' && (step.key === 'connection_request' || step.key === 'follow_up') && !state.loading && state.tasks.length > 0) {
       render();
       return;
     }
