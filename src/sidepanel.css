@@ -919,6 +919,35 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   color: var(--primary);
 }
 
+.fu-name-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 3px 8px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  line-height: 1.4;
+  width: fit-content;
+}
+
+.fu-name-chip:hover {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+}
+
+.fu-name-chip.copied {
+  background: #bbf7d0;
+  border-color: #86efac;
+  color: #166534;
+}
+
 .revoke-actions {
   flex-shrink: 0;
   margin-left: auto;

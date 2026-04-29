@@ -902,7 +902,7 @@ function buildFollowUpList() {
     const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
     const fuLabel = getFollowUpLabel(task.data_type);
 
-    const isActive = !isActioned && task.profile_url && urlMatches(task.profile_url, state.currentTabUrl);
+    const isActive = !isActioned;
 
     if (isActioned) {
       return `
@@ -929,10 +929,17 @@ function buildFollowUpList() {
           <span class="badge badge-fu">${esc(fuLabel)}</span>
           ${dueHtml}
         </div>
+        ${name ? `<button class="fu-name-chip" data-copy="${esc(name)}" title="Click to copy name">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          ${esc(name)}
+        </button>` : ''}
         <div class="revoke-line2">
           ${campaignHtml}
           <span class="revoke-actions">
-            <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="follow_up" data-tid="${task.id}"${!isActive ? ' disabled title="Navigate to this profile to enable the Send button"' : ''}>Send</button>
+            <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="follow_up" data-tid="${task.id}">Send</button>
           </span>
         </div>
         ${task.content ? `
@@ -1210,8 +1217,8 @@ function setupGlobalDelegation() {
       return;
     }
 
-    // Copy connection request content
-    const copyBtn = e.target.closest('.cr-copy-btn');
+    // Copy connection request content or name chip
+    const copyBtn = e.target.closest('.cr-copy-btn, .fu-name-chip');
     if (copyBtn) {
       const text = copyBtn.dataset.copy;
       navigator.clipboard.writeText(text).then(() => {
