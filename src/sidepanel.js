@@ -2,19 +2,37 @@
 // STATE
 // =============================================================================
 
+const ALLOWED_USER_TYPES = ['Admin', 'Chatter', 'Backoffice'];
+
 const STEPS = [
-  { key: 'connection_acceptance', label: 'Connection Acceptance', enabled: true },
-  { key: 'messaging', label: 'Messaging', enabled: false },
-  { key: 'connection_request', label: 'Connection Request', enabled: true },
-  { key: 'follow_up', label: 'Follow-Up', enabled: true },
-  { key: 'revoke_connection_request', label: 'Revoke Connection Request', enabled: true },
+  { key: 'connection_acceptance', label: 'Connection Acceptance', enabled: true, requiresType: ['Admin', 'Backoffice'] },
+  { key: 'messaging', label: 'Messaging', enabled: false, requiresType: ['Admin', 'Backoffice'] },
+  { key: 'connection_request', label: 'Connection Request', enabled: true, requiresType: ['Admin', 'Backoffice'] },
+  { key: 'follow_up', label: 'Follow-Up', enabled: true, requiresType: ['Admin', 'Backoffice'] },
+  { key: 'revoke_connection_request', label: 'Revoke Connection Request', enabled: true, requiresType: ['Admin', 'Backoffice'] },
+  { key: 'chatter_tasks', label: 'Chatter Tasks', enabled: true, requiresType: ['Admin', 'Chatter'] },
 ];
+
+function isStepVisible(step) {
+  if (step.requiresType && step.requiresType.length > 0) {
+    return step.requiresType.includes(state.userType);
+  }
+  return true;
+}
+
+function firstVisibleStepIndex() {
+  for (let i = 0; i < STEPS.length; i++) {
+    if (isStepVisible(STEPS[i])) return i;
+  }
+  return 0;
+}
 
 const state = {
   // Auth
   token: null,
   backendUrl: 'https://backend.leadblocks.nl',
   userName: '',          // logged-in user's display name
+  userType: '',          // logged-in user's type (e.g. 'Admin', 'Chatter', 'Customer')
 
   // Current step
   currentStep: 0,
@@ -47,6 +65,18 @@ const state = {
   // Per-task state
   actionedTasks: {},      // taskId -> 'connected' | 'revoked' | 'disconnected'
   contactDetails: {},     // taskId -> {email, phone, birthday, date_connected}
+
+  // Chatter Tasks (step 6) per-task state
+  chatterAction: {},      // taskDocId -> 'send_message' | 'forward_client' | 'back_campaign' | 'disconnect'
+  chatterSent: {},        // taskDocId -> 'message' | 'forwarded' | 'back_campaign'
+  chatterDisconnected: {},// taskDocId -> true
+  chatterFollowUp: {},    // taskDocId -> bool (controls follow-up date visibility)
+  chatterTaskTags: {},    // taskDocId -> array of {id, tag_name, colour, is_standard}
+  chatterTagSelectorOpen: {}, // taskDocId -> bool (is the tag dropdown open)
+  availableTagsByProfile: {}, // numericProfileId -> array of tags (cached for chatter tasks tab)
+  campaignContentPopup: null, // null | { title, content: [...] , loading: bool, error: string }
+  notesPopup: null,           // null | { title, notes: [...] }
+  chatPopup: null,            // null | { title, messages, prospectId, loading, error }
 
   // Connection acceptance (step 1) state
   acceptanceResult: null,  // null | { status, task?, message? }
@@ -145,10 +175,11 @@ async function apiPost(path, body) {
 
 function loadStoredAuth() {
   return new Promise(resolve => {
-    chrome.storage.local.get(['token', 'backendUrl', 'userName'], data => {
+    chrome.storage.local.get(['token', 'backendUrl', 'userName', 'userType'], data => {
       console.log('[Auth] Loaded from storage:', { token: !!data.token, backendUrl: data.backendUrl });
       if (data.token) state.token = data.token;
       if (data.userName) state.userName = data.userName;
+      if (data.userType) state.userType = data.userType;
       // Only update backendUrl if we have a stored value, otherwise keep default
       if (data.backendUrl && typeof data.backendUrl === 'string' && data.backendUrl.trim()) {
         state.backendUrl = data.backendUrl.trim();
@@ -159,12 +190,12 @@ function loadStoredAuth() {
   });
 }
 
-function saveAuth(token, backendUrl, userName) {
-  return new Promise(resolve => chrome.storage.local.set({ token, backendUrl, userName }, resolve));
+function saveAuth(token, backendUrl, userName, userType) {
+  return new Promise(resolve => chrome.storage.local.set({ token, backendUrl, userName, userType }, resolve));
 }
 
 function clearAuth() {
-  return new Promise(resolve => chrome.storage.local.remove(['token', 'backendUrl', 'userName'], resolve));
+  return new Promise(resolve => chrome.storage.local.remove(['token', 'backendUrl', 'userName', 'userType'], resolve));
 }
 
 // =============================================================================
@@ -268,6 +299,25 @@ async function loadAllTasks() {
 
       const result = await apiGet(`/api/extension/follow-up-tasks?${params.toString()}`);
       all = result.data || [];
+    } else if (step.key === 'chatter_tasks') {
+      // Use dedicated extension endpoint for Chatter Tasks
+      const params = new URLSearchParams();
+      if (state.appliedProfileId) params.append('profileId', state.appliedProfileId);
+      if (state.appliedCampaignId) params.append('campaignId', state.appliedCampaignId);
+      if (state.appliedLinkedInSearch) params.append('profileUrlSearch', state.appliedLinkedInSearch);
+
+      const result = await apiGet(`/api/extension/chatter-tasks?${params.toString()}`);
+      all = result.data || [];
+
+      // Initialise per-task tag selection from existing prospect tags
+      state.chatterTaskTags = {};
+      for (const task of all) {
+        state.chatterTaskTags[task.documentId] = Array.isArray(task.tags_relation)
+          ? task.tags_relation.slice()
+          : [];
+      }
+      // Fire-and-forget: load all available tags for the tag picker
+      loadAvailableTags();
     } else {
       // Default: paginated fetch from all-robot-tasks
       let page = 1;
@@ -489,7 +539,7 @@ async function handleFirstConnectionConnect() {
 function render() {
   const app = document.getElementById('app');
   if (!app) return;
-  app.innerHTML = state.view === 'login' ? buildLogin() : buildMain();
+  app.innerHTML = (state.view === 'login' ? buildLogin() : buildMain()) + buildCampaignContentPopup() + buildNotesPopup() + buildChatPopup();
   attachListeners();
 }
 
@@ -508,6 +558,7 @@ function buildLogin() {
         <div class="checkbox-option">
           <input type="checkbox" id="chk-production" ${isProduction ? 'checked' : ''} />
           <span>Production</span>
+          <span class="env-hint">${isProduction ? 'backend.leadblocks.nl' : 'localhost:1337'}</span>
         </div>
       </div>
       <div class="field">
@@ -547,12 +598,14 @@ function buildMain() {
 
 function buildSteps() {
   const items = STEPS.map((step, i) => {
+    if (!isStepVisible(step)) return '';
     const isActive = i === state.currentStep;
     const isDone = i < state.currentStep;
     const cls = isActive ? 'step active' : isDone ? 'step done' : 'step';
     const num = i + 1;
+    const titleText = step.enabled ? step.label : `${step.label} (coming soon)`;
     return `
-      <button class="${cls}" data-step="${i}" ${!step.enabled ? 'disabled' : ''} title="${esc(step.label)}">
+      <button class="${cls}" data-step="${i}" ${!step.enabled ? 'disabled' : ''} title="${esc(titleText)}">
         <span class="step-num">${num}</span>
         ${isActive ? `<span class="step-label">${esc(step.label)}</span>` : ''}
       </button>
@@ -653,17 +706,17 @@ function buildTaskArea() {
 
   // Steps 2-5 are not yet implemented
   if (!step.enabled) {
-    return `<div class="empty-state" style="padding:32px 0"><strong>${esc(step.label)}</strong><br><br>This step is not yet available.<br>It will be added in a future update.</div>`;
+    return `<div class="empty-state" style="padding:32px 0"><strong>${esc(step.label)}</strong><br><br>Coming soon — this step is being built.</div>`;
   }
 
   if (state.loading) {
     return `<div class="loading"><div class="spinner"></div><span>Loading tasks…</span></div>`;
   }
   if (state.error) {
-    return `<div class="error-msg">Failed to load tasks: ${esc(state.error)}</div>`;
+    return `<div class="error-msg">Couldn't load tasks: ${esc(state.error)}</div>`;
   }
   if (!state.appliedProfileId) {
-    return `<div class="empty-state">Select a customer and profile, then click Apply.</div>`;
+    return `<div class="empty-state">👆 Pick a customer & profile above, then press <strong>Filter</strong>.</div>`;
   }
 
   // Step 1: Connection acceptance — single-lookup flow
@@ -672,7 +725,7 @@ function buildTaskArea() {
   }
 
   if (state.tasks.length === 0) {
-    return `<div class="empty-state">No tasks found.</div>`;
+    return `<div class="empty-state">🎉 All caught up — no ${esc(step.label.toLowerCase())} tasks right now.</div>`;
   }
 
   // Revoke step uses compact list view
@@ -688,6 +741,11 @@ function buildTaskArea() {
   // Follow-Up step uses compact list view
   if (step.key === 'follow_up') {
     return buildFollowUpList();
+  }
+
+  // Chatter Tasks step
+  if (step.key === 'chatter_tasks') {
+    return buildChatterTasksList();
   }
 
   return `${buildQueueMode()}`;
@@ -960,6 +1018,481 @@ function buildFollowUpList() {
   return `
     <div class="revoke-summary">${state.tasks.length} Follow-Up task${state.tasks.length !== 1 ? 's' : ''} due</div>
     <div class="revoke-list">${rows}</div>
+  `;
+}
+
+// --- Chatter Tasks list ---
+
+function buildChatterTasksList() {
+  const rows = state.tasks.map(task => {
+    const tid = task.documentId;
+    const action = state.chatterAction[tid] || '';
+    const sentKind = state.chatterSent[tid];
+    const isDisconnected = !!state.chatterDisconnected[tid];
+    const followUpChecked = !!state.chatterFollowUp[tid];
+
+    const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
+    const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
+    const campaignName = task.campaign_prospect?.campaign?.campaign_name || '';
+    const profileNumericId = task.campaign_prospect?.campaign?.profile?.id;
+    const currentTags = state.chatterTaskTags[tid] || [];
+    const allForProfile = profileNumericId
+      ? (state.availableTagsByProfile[String(profileNumericId)] || [])
+      : [];
+    const selectableTags = allForProfile
+      .filter(t => !currentTags.some(c => String(c.id) === String(t.id)))
+      .sort((a, b) => {
+        const order = ['#018531', '#b8860b', '#960303'];
+        const ia = order.indexOf((a.colour || '').toLowerCase());
+        const ib = order.indexOf((b.colour || '').toLowerCase());
+        if (ia !== -1 && ib !== -1) return ia - ib;
+        if (ia !== -1) return -1;
+        if (ib !== -1) return 1;
+        return (a.tag_name || '').localeCompare(b.tag_name || '');
+      });
+    const tagsExpanded = !!state.chatterTagSelectorOpen[tid];
+    const tagsHtml = (currentTags.length || selectableTags.length) ? `
+      <div class="ct-tags-row ${tagsExpanded ? 'expanded' : 'collapsed'}">
+        <span class="ct-tags-label">Tags</span>
+        <div class="ct-tags-scroll">
+          ${currentTags.map(t => `
+            <span class="ct-tag-chip selected" style="background:${esc(t.colour || '#64748b')}" title="Click × to remove">
+              ${esc(t.tag_name)}
+              <button class="ct-tag-remove" data-ct-remove-tag="${esc(tid)}" data-tag-id="${esc(t.id)}" title="Remove tag">&times;</button>
+            </span>`).join('')}
+          ${selectableTags.map(t => `
+            <button class="ct-tag-chip ct-tag-add" data-ct-add-tag="${esc(tid)}" data-tag-id="${esc(t.id)}" style="background:${esc(t.colour || '#64748b')}" title="Click to add">
+              + ${esc(t.tag_name)}
+            </button>`).join('')}
+        </div>
+        ${selectableTags.length > 0 ? `
+          <button class="ct-tags-expand" data-ct-tag-toggle="${esc(tid)}" title="${tagsExpanded ? 'Collapse' : 'Show all tags'}">
+            ${tagsExpanded ? '▴ Less' : `▾ +${selectableTags.length}`}
+          </button>` : ''}
+      </div>` : '';
+    const campaignHtml = campaignName
+      ? `<span class="campaign-pill"><span class="campaign-dot${task.campaign_prospect?.campaign?.live ? ' live' : ''}"></span>${esc(campaignName)}</span>
+         <button class="ct-view-campaign-btn" data-ct-view-campaign="${esc(campaignName)}" title="View campaign content">
+           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+         </button>`
+      : '';
+    const hasNotes = Array.isArray(task.chatter_notes) && task.chatter_notes.length > 0;
+    const notesBtn = hasNotes
+      ? `<button class="ct-icon-btn ct-notes-btn" data-ct-view-notes="${esc(tid)}" title="View chatter notes (${task.chatter_notes.length})">
+           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+         </button>`
+      : '';
+    const chatBtn = (task.profile_id && task.prospect_id)
+      ? `<button class="ct-icon-btn ct-chat-btn" data-ct-view-chat="${esc(tid)}" title="View LinkedIn chat">
+           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+         </button>`
+      : '';
+
+    return `
+      <div class="ct-card" data-tid="${esc(tid)}">
+        <div class="ct-line1">
+          ${task.profile_url
+            ? `<a href="${esc(task.profile_url)}" class="revoke-url" data-cr-nav="${esc(task.profile_url)}">${esc(task.profile_url)}</a>`
+            : `<span class="revoke-url muted">${esc(name) || 'Unknown prospect'}</span>`}
+          ${task.data_type ? `<span class="badge badge-fu">${esc(task.data_type)}</span>` : ''}
+          ${dueHtml}
+        </div>
+        ${name ? `<button class="fu-name-chip" data-copy="${esc(name)}" title="Click to copy name">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          ${esc(name)}
+        </button>` : ''}
+        ${campaignHtml || hasNotes || chatBtn ? `<div class="ct-line2">${campaignHtml}${notesBtn}${chatBtn}</div>` : ''}
+        ${task.content ? `
+        <div class="cr-content-wrap">
+          <button class="cr-copy-btn" data-copy="${esc(task.content)}" title="Copy message">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            Copy
+          </button>
+          <div class="cr-content">${esc(task.content)}</div>
+        </div>` : ''}
+
+        ${tagsHtml}
+
+        <div class="ct-actions">
+          <div class="ct-action-tabs" role="tablist">
+            <button class="ct-action-tab ${action === 'send_message' ? 'active' : ''}" data-ct-set-action="send_message" data-ct-tid="${esc(tid)}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+              Send
+            </button>
+            <button class="ct-action-tab ${action === 'forward_client' ? 'active' : ''}" data-ct-set-action="forward_client" data-ct-tid="${esc(tid)}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 17 20 12 15 7"></polyline><path d="M4 18v-2a4 4 0 0 1 4-4h12"></path></svg>
+              Forward
+            </button>
+            <button class="ct-action-tab ${action === 'back_campaign' ? 'active' : ''}" data-ct-set-action="back_campaign" data-ct-tid="${esc(tid)}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>
+              Back to campaign
+            </button>
+            <button class="ct-action-tab danger ${action === 'disconnect' ? 'active' : ''}" data-ct-set-action="disconnect" data-ct-tid="${esc(tid)}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+              Disconnect
+            </button>
+          </div>
+
+          ${action === 'send_message' ? `
+          <div class="ct-form">
+            <label class="ct-label">Message <span class="ct-label-hint">— what you sent to the prospect</span></label>
+            <textarea class="ct-input" id="ct-msg-${esc(tid)}" placeholder="Type the message you sent…" rows="3"></textarea>
+            <label class="ct-label">Date sent</label>
+            <input type="date" class="ct-input" id="ct-date-${esc(tid)}" />
+            <label class="ct-checkbox-row">
+              <input type="checkbox" class="ct-followup-toggle" data-ct-tid="${esc(tid)}" ${followUpChecked ? 'checked' : ''} />
+              Schedule a follow-up
+            </label>
+            ${followUpChecked ? `
+              <label class="ct-label">Follow-up date</label>
+              <input type="date" class="ct-input" id="ct-fudate-${esc(tid)}" />` : ''}
+            <button class="btn btn-primary btn-xs" data-ct-action="send_message" data-ct-tid="${esc(tid)}" ${sentKind === 'message' ? 'disabled' : ''}>
+              ${sentKind === 'message' ? '✓ Message recorded' : 'Confirm message sent'}
+            </button>
+          </div>` : ''}
+
+          ${action === 'forward_client' ? `
+          <div class="ct-form">
+            <p class="ct-hint">Pass this prospect's contact details to the client.</p>
+            <label class="ct-label">Prospect email</label>
+            <input type="email" class="ct-input" id="ct-email-${esc(tid)}" placeholder="name@example.com" />
+            <label class="ct-label">Prospect phone</label>
+            <input type="tel" class="ct-input" id="ct-phone-${esc(tid)}" placeholder="+31 6 …" />
+            <button class="btn btn-primary btn-xs" data-ct-action="forward_client" data-ct-tid="${esc(tid)}" ${sentKind === 'forwarded' ? 'disabled' : ''}>
+              ${sentKind === 'forwarded' ? '✓ Forwarded to client' : 'Forward to client'}
+            </button>
+          </div>` : ''}
+
+          ${action === 'back_campaign' ? `
+          <div class="ct-form">
+            <p class="ct-hint">Send this prospect back into the campaign flow (a new follow-up will be scheduled).</p>
+            <button class="btn btn-primary btn-xs" data-ct-action="back_campaign" data-ct-tid="${esc(tid)}" ${sentKind === 'back_campaign' ? 'disabled' : ''}>
+              ${sentKind === 'back_campaign' ? '✓ Sent back to campaign' : 'Send back to campaign'}
+            </button>
+          </div>` : ''}
+
+          ${action === 'disconnect' ? `
+          <div class="ct-form">
+            <p class="ct-hint">⚠ Use when the LinkedIn URL is no longer valid or the prospect has disconnected. This removes them from the campaign.</p>
+            <button class="btn btn-danger btn-xs" data-ct-action="disconnect" data-ct-tid="${esc(tid)}" ${isDisconnected ? 'disabled' : ''}>
+              ${isDisconnected ? '✓ Disconnected' : 'Confirm disconnect'}
+            </button>
+          </div>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="revoke-summary">${state.tasks.length} Chatter task${state.tasks.length !== 1 ? 's' : ''}</div>
+    <div class="revoke-list">${rows}</div>
+  `;
+}
+
+// --- Chatter Tasks action handlers ---
+
+function getChatterTask(tid) {
+  return state.tasks.find(t => String(t.documentId) === String(tid));
+}
+
+// Fetch all tags once and group by profile id (numeric)
+async function loadAvailableTags() {
+  // Skip if already loaded
+  if (Object.keys(state.availableTagsByProfile).length > 0) return;
+  try {
+    const pageSize = 100;
+    const buildUrl = (page) =>
+      `/api/tags?fields[0]=id&fields[1]=tag_name&fields[2]=colour&fields[3]=is_standard` +
+      `&populate[profiles][fields][0]=id` +
+      `&pagination[page]=${page}&pagination[pageSize]=${pageSize}`;
+
+    const first = await apiGet(buildUrl(1));
+    let all = Array.isArray(first?.data) ? first.data.slice() : [];
+    const pageCount = first?.meta?.pagination?.pageCount || 1;
+    if (pageCount > 1) {
+      const rest = await Promise.all(
+        Array.from({ length: pageCount - 1 }, (_, i) => apiGet(buildUrl(i + 2)))
+      );
+      for (const page of rest) {
+        if (Array.isArray(page?.data)) all = all.concat(page.data);
+      }
+    }
+    // Group by profile numeric id
+    const byProfile = {};
+    for (const tag of all) {
+      const profiles = Array.isArray(tag.profiles?.data)
+        ? tag.profiles.data.map(p => p.id)
+        : Array.isArray(tag.profiles)
+          ? tag.profiles.map(p => p.id)
+          : [];
+      const flat = {
+        id: tag.id ?? tag.attributes?.id,
+        tag_name: tag.tag_name ?? tag.attributes?.tag_name,
+        colour: tag.colour ?? tag.attributes?.colour,
+        is_standard: tag.is_standard ?? tag.attributes?.is_standard,
+      };
+      for (const pid of profiles) {
+        const key = String(pid);
+        if (!byProfile[key]) byProfile[key] = [];
+        byProfile[key].push(flat);
+      }
+    }
+    state.availableTagsByProfile = byProfile;
+    if (STEPS[state.currentStep]?.key === 'chatter_tasks') render();
+  } catch (err) {
+    console.warn('[Tags] Failed to load available tags:', err?.message);
+  }
+}
+
+async function handleChatterSendMessage(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  const message = el(`ct-msg-${tid}`)?.value || '';
+  const dateSent = el(`ct-date-${tid}`)?.value || '';
+  const followUp = !!state.chatterFollowUp[tid];
+  const followUpDate = el(`ct-fudate-${tid}`)?.value || '';
+
+  if (message && !dateSent) {
+    showToast('Please fill in the date sent when you provide a message.', 'error');
+    return;
+  }
+  if (followUp && !followUpDate) {
+    showToast('Please fill in the follow-up date.', 'error');
+    return;
+  }
+
+  try {
+    const selectedTagIds = (state.chatterTaskTags[tid] || []).map(t => t.id);
+    await apiPost('/api/data-senders/message_sent', {
+      ...task,
+      documentId: tid,
+      prospect_id: task.prospect_id,
+      campaign_id: task.campaign_id,
+      message,
+      date_sent: dateSent,
+      selected_tag_ids: selectedTagIds,
+      follow_up: followUp,
+      follow_up_date: followUp ? followUpDate : null,
+    });
+    state.chatterSent[tid] = 'message';
+    showToast('Message sent successfully!');
+    render();
+  } catch (err) {
+    showToast(`Failed to send message: ${err.message}`, 'error');
+  }
+}
+
+async function handleChatterForwardClient(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  const email = el(`ct-email-${tid}`)?.value || '';
+  const phone = el(`ct-phone-${tid}`)?.value || '';
+  if (!email || !phone) {
+    showToast('Please fill in both email and phone number.', 'error');
+    return;
+  }
+  try {
+    const selectedTagIds = (state.chatterTaskTags[tid] || []).map(t => t.id);
+    await apiPost('/api/data-senders/forward_to_client', {
+      ...task,
+      documentId: tid,
+      prospect_id: task.prospect_id,
+      campaign_id: task.campaign_id,
+      email,
+      phone,
+      selected_tag_ids: selectedTagIds,
+    });
+    state.chatterSent[tid] = 'forwarded';
+    showToast('Forwarded to client successfully!');
+    render();
+  } catch (err) {
+    showToast(`Failed to forward: ${err.message}`, 'error');
+  }
+}
+
+async function handleChatterBackCampaign(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  try {
+    const selectedTagIds = (state.chatterTaskTags[tid] || []).map(t => t.id);
+    await apiPost('/api/data-senders/back_campaign', {
+      ...task,
+      documentId: tid,
+      prospect_id: task.prospect_id,
+      campaign_id: task.campaign_id,
+      email: '',
+      phone: '',
+      selected_tag_ids: selectedTagIds,
+    });
+    state.chatterSent[tid] = 'back_campaign';
+    showToast('Sent back to campaign successfully!');
+    render();
+  } catch (err) {
+    showToast(`Failed to send back to campaign: ${err.message}`, 'error');
+  }
+}
+
+async function handleChatterDisconnect(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  try {
+    await apiPost('/api/data-senders/disconnect', {
+      ...task,
+      documentId: tid,
+    });
+    state.chatterDisconnected[tid] = true;
+    showToast('Prospect disconnected successfully!');
+    render();
+  } catch (err) {
+    showToast(`Failed to disconnect: ${err.message}`, 'error');
+  }
+}
+
+async function showCampaignContentPopup(campaignName) {
+  state.campaignContentPopup = { title: campaignName, content: [], loading: true, error: null };
+  render();
+  try {
+    const data = await apiGet(`/api/campaigns?filters[campaign_name][$eq]=${encodeURIComponent(campaignName)}&populate=Content`);
+    const contentArr = data?.data?.[0]?.Content || [];
+    state.campaignContentPopup = { title: campaignName, content: contentArr, loading: false, error: null };
+  } catch (err) {
+    state.campaignContentPopup = { title: campaignName, content: [], loading: false, error: err.message };
+  }
+  render();
+}
+
+function buildCampaignContentPopup() {
+  const p = state.campaignContentPopup;
+  if (!p) return '';
+  const body = p.loading
+    ? `<div class="loading"><div class="spinner"></div><span>Loading…</span></div>`
+    : p.error
+      ? `<div class="error-msg">${esc(p.error)}</div>`
+      : p.content.length === 0
+        ? `<p class="muted" style="text-align:center">No content found for this campaign.</p>`
+        : p.content.map(msg => `
+            <div class="ct-cc-bubble">
+              <div class="ct-cc-text">${esc(msg.message_content || '')}</div>
+              ${msg.message_delay !== undefined ? `<div class="ct-cc-delay">Delay: ${esc(String(msg.message_delay))} days</div>` : ''}
+            </div>
+          `).join('');
+
+  return `
+    <div class="ct-cc-overlay" id="ct-cc-overlay">
+      <div class="ct-cc-modal">
+        <div class="ct-cc-header">
+          <h3>Content for ${esc(p.title)}</h3>
+          <button class="ct-cc-close" id="ct-cc-close" title="Close">×</button>
+        </div>
+        <div class="ct-cc-body">${body}</div>
+      </div>
+    </div>
+  `;
+}
+
+function showNotesPopup(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
+  state.notesPopup = {
+    title: `Chatter Note History - ${name}`,
+    notes: task.chatter_notes || [],
+  };
+  render();
+}
+
+function buildNotesPopup() {
+  const p = state.notesPopup;
+  if (!p) return '';
+  const body = p.notes.length === 0
+    ? `<p class="muted" style="text-align:center">No notes found.</p>`
+    : p.notes.map(n => `
+        <div class="ct-note">
+          <div class="ct-note-meta">
+            <span class="ct-note-creator">${esc(n.creator || 'Unknown')}</span>
+            <span class="ct-note-date">${n.date ? esc(new Date(n.date).toLocaleString()) : ''}</span>
+          </div>
+          <div class="ct-note-content">${esc(n.content || '')}</div>
+        </div>
+      `).join('');
+  return `
+    <div class="ct-cc-overlay" id="ct-notes-overlay">
+      <div class="ct-cc-modal">
+        <div class="ct-cc-header">
+          <h3>${esc(p.title)}</h3>
+          <button class="ct-cc-close" id="ct-notes-close" title="Close">×</button>
+        </div>
+        <div class="ct-cc-body">${body}</div>
+      </div>
+    </div>
+  `;
+}
+
+async function showChatPopup(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
+  state.chatPopup = {
+    title: `Chat with ${name}`,
+    messages: [],
+    prospectId: task.prospect_id,
+    loading: true,
+    error: null,
+  };
+  render();
+
+  try {
+    const data = await apiGet(
+      `/api/linked-in-chats?filters[customer_id][$eq]=${encodeURIComponent(task.profile_id)}&filters[profile_id][$eq]=${encodeURIComponent(task.prospect_id)}&populate=messages`
+    );
+    const raw = data?.data?.[0]?.messages || [];
+    const messages = raw
+      .map(m => ({ content: m.content, messageDate: m.message_date, senderId: m.sender_id }))
+      .sort((a, b) => new Date(a.messageDate).getTime() - new Date(b.messageDate).getTime());
+    state.chatPopup = { ...state.chatPopup, messages, loading: false };
+  } catch (err) {
+    state.chatPopup = { ...state.chatPopup, loading: false, error: err.message };
+  }
+  render();
+}
+
+function buildChatPopup() {
+  const p = state.chatPopup;
+  if (!p) return '';
+  const body = p.loading
+    ? `<div class="loading"><div class="spinner"></div><span>Loading chat…</span></div>`
+    : p.error
+      ? `<div class="error-msg">${esc(p.error)}</div>`
+      : p.messages.length === 0
+        ? `<p class="muted" style="text-align:center">No chat messages found.</p>`
+        : p.messages.map(m => {
+            const isProspect = String(m.senderId) === String(p.prospectId);
+            const dateStr = m.messageDate ? new Date(m.messageDate).toLocaleString() : '';
+            return `
+              <div class="ct-chat-row ${isProspect ? 'left' : 'right'}">
+                <div class="ct-chat-bubble ${isProspect ? 'prospect' : 'me'}">
+                  <div class="ct-cc-text">${esc(m.content || '')}</div>
+                  ${dateStr ? `<div class="ct-chat-date">${esc(dateStr)}</div>` : ''}
+                </div>
+              </div>
+            `;
+          }).join('');
+  return `
+    <div class="ct-cc-overlay" id="ct-chat-overlay">
+      <div class="ct-cc-modal">
+        <div class="ct-cc-header">
+          <h3>${esc(p.title)}</h3>
+          <button class="ct-cc-close" id="ct-chat-close" title="Close">×</button>
+        </div>
+        <div class="ct-cc-body">${body}</div>
+      </div>
+    </div>
   `;
 }
 
@@ -1249,6 +1782,132 @@ function setupGlobalDelegation() {
           break;
       }
     }
+
+    // Chatter task action buttons
+    const ctBtn = e.target.closest('[data-ct-action]');
+    if (ctBtn) {
+      const tid = ctBtn.dataset.ctTid;
+      switch (ctBtn.dataset.ctAction) {
+        case 'send_message':   handleChatterSendMessage(tid); break;
+        case 'forward_client': handleChatterForwardClient(tid); break;
+        case 'back_campaign':  handleChatterBackCampaign(tid); break;
+        case 'disconnect':     handleChatterDisconnect(tid); break;
+      }
+      return;
+    }
+
+    // View campaign content button
+    const viewCampaignBtn = e.target.closest('[data-ct-view-campaign]');
+    if (viewCampaignBtn) {
+      showCampaignContentPopup(viewCampaignBtn.dataset.ctViewCampaign);
+      return;
+    }
+
+    // Toggle tag selector
+    const tagToggleBtn = e.target.closest('[data-ct-tag-toggle]');
+    if (tagToggleBtn) {
+      const tid = tagToggleBtn.dataset.ctTagToggle;
+      state.chatterTagSelectorOpen[tid] = !state.chatterTagSelectorOpen[tid];
+      render();
+      return;
+    }
+
+    // Set chatter action (Send / Forward / Back / Disconnect)
+    const actionTab = e.target.closest('[data-ct-set-action]');
+    if (actionTab) {
+      const tid = actionTab.dataset.ctTid;
+      const newAction = actionTab.dataset.ctSetAction;
+      // Toggle off if user clicks the already-selected action
+      state.chatterAction[tid] = state.chatterAction[tid] === newAction ? '' : newAction;
+      render();
+      return;
+    }
+
+    // Add tag to task
+    const addTagBtn = e.target.closest('[data-ct-add-tag]');
+    if (addTagBtn) {
+      const tid = addTagBtn.dataset.ctAddTag;
+      const tagId = addTagBtn.dataset.tagId;
+      const task = getChatterTask(tid);
+      const profileNumericId = task?.campaign_prospect?.campaign?.profile?.id;
+      const pool = profileNumericId
+        ? (state.availableTagsByProfile[String(profileNumericId)] || [])
+        : [];
+      const tag = pool.find(t => String(t.id) === String(tagId));
+      if (tag) {
+        const current = state.chatterTaskTags[tid] || [];
+        if (!current.some(c => String(c.id) === String(tag.id))) {
+          state.chatterTaskTags[tid] = [...current, tag];
+        }
+        state.chatterTagSelectorOpen[tid] = false;
+        render();
+      }
+      return;
+    }
+
+    // Remove tag from task
+    const removeTagBtn = e.target.closest('[data-ct-remove-tag]');
+    if (removeTagBtn) {
+      const tid = removeTagBtn.dataset.ctRemoveTag;
+      const tagId = removeTagBtn.dataset.tagId;
+      state.chatterTaskTags[tid] = (state.chatterTaskTags[tid] || []).filter(
+        t => String(t.id) !== String(tagId)
+      );
+      render();
+      return;
+    }
+
+    // View notes button
+    const viewNotesBtn = e.target.closest('[data-ct-view-notes]');
+    if (viewNotesBtn) {
+      showNotesPopup(viewNotesBtn.dataset.ctViewNotes);
+      return;
+    }
+
+    // View chat button
+    const viewChatBtn = e.target.closest('[data-ct-view-chat]');
+    if (viewChatBtn) {
+      showChatPopup(viewChatBtn.dataset.ctViewChat);
+      return;
+    }
+
+    // Close campaign content popup
+    if (e.target.id === 'ct-cc-close' || e.target.id === 'ct-cc-overlay') {
+      state.campaignContentPopup = null;
+      render();
+      return;
+    }
+
+    // Close notes popup
+    if (e.target.id === 'ct-notes-close' || e.target.id === 'ct-notes-overlay') {
+      state.notesPopup = null;
+      render();
+      return;
+    }
+
+    // Close chat popup
+    if (e.target.id === 'ct-chat-close' || e.target.id === 'ct-chat-overlay') {
+      state.chatPopup = null;
+      render();
+      return;
+    }
+  });
+
+  // Chatter task follow-up checkbox toggle
+  document.addEventListener('change', e => {
+    const fu = e.target.closest('.ct-followup-toggle');
+    if (fu) {
+      const tid = fu.dataset.ctTid;
+      state.chatterFollowUp[tid] = fu.checked;
+      render();
+      return;
+    }
+    // Live-update environment hint on login screen
+    if (e.target.id === 'chk-production') {
+      const hint = document.querySelector('.env-hint');
+      if (hint) hint.textContent = e.target.checked ? 'backend.leadblocks.nl' : 'localhost:1337';
+      return;
+    }
   });
 
   // Input delegation — contact fields (class="ci")
@@ -1431,11 +2090,22 @@ async function doLogin() {
 
   try {
     const data = await loginRequest(backendUrl, email, password);
+    const userType = data.user?.type || '';
+    if (!ALLOWED_USER_TYPES.includes(userType)) {
+      if (errEl) {
+        errEl.textContent = 'Your account type is not allowed to use this extension.';
+        errEl.style.display = 'block';
+      }
+      if (btnLogin) { btnLogin.disabled = false; btnLogin.textContent = 'Sign in'; }
+      return;
+    }
     state.token = data.jwt;
     state.backendUrl = backendUrl;
     state.userName = data.user?.username || data.user?.email || '';
+    state.userType = userType;
+    state.currentStep = firstVisibleStepIndex();
     console.log('[Auth] Set backendUrl to:', state.backendUrl);
-    await saveAuth(data.jwt, backendUrl, state.userName);
+    await saveAuth(data.jwt, backendUrl, state.userName, state.userType);
     await bootMainView();
   } catch (err) {
     if (errEl) { errEl.textContent = err.message; errEl.style.display = 'block'; }
@@ -1448,6 +2118,8 @@ async function doLogout() {
   Object.assign(state, {
     token: null,
     backendUrl: 'http://localhost:1337', // Reset to default
+    userName: '',
+    userType: '',
     view: 'login',
     customers: [],
     campaigns: [],
@@ -1513,6 +2185,35 @@ async function loadCustomers() {
 
 async function bootMainView() {
   state.view = 'main';
+  // Refresh user type from backend (handles older sessions without stored userType)
+  try {
+    const me = await apiGet('/api/users/me');
+    if (me?.type) {
+      state.userType = me.type;
+      chrome.storage.local.set({ userType: me.type });
+    }
+  } catch (e) {
+    console.warn('[Auth] Failed to refresh user type:', e?.message);
+  }
+  // Enforce user-type whitelist for already-stored sessions
+  if (!ALLOWED_USER_TYPES.includes(state.userType)) {
+    await clearAuth();
+    Object.assign(state, {
+      token: null,
+      userName: '',
+      userType: '',
+      view: 'login',
+      customers: [],
+      campaigns: [],
+      tasks: [],
+    });
+    render();
+    return;
+  }
+  // Make sure we land on a step the user is allowed to see
+  if (!isStepVisible(STEPS[state.currentStep])) {
+    state.currentStep = firstVisibleStepIndex();
+  }
   await loadCustomers();
 }
 
