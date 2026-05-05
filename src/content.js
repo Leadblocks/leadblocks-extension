@@ -209,6 +209,12 @@ console.log('[Content] Content script loaded on:', window.location.href);
     jan: 0, feb: 1, mar: 2, apr: 3, jun: 5, jul: 6,
     aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
     mrt: 2, okt: 9,
+    // German
+    januar: 0, februar: 1, märz: 2, mai: 4, dezember: 11, mär: 2, dez: 11,
+    // French
+    janvier: 0, février: 1, mars: 2, avril: 3, juin: 5, juillet: 6,
+    août: 7, octobre: 9, décembre: 11,
+    fév: 1, avr: 3, juil: 6, aoû: 7, déc: 11,
   };
 
   // Label text (lowercased) → field name
@@ -243,31 +249,39 @@ console.log('[Content] Content script loaded on:', window.location.href);
     return null;
   }
 
+  /** Extract a contact field value from a label/value element pair */
+  function extractFieldValue(field, valueEl) {
+    if (!valueEl) return '';
+    if (field === 'email') {
+      const mailto = valueEl.querySelector('a[href^="mailto:"]');
+      return mailto ? mailto.textContent.trim() : valueEl.textContent.trim();
+    }
+    if (field === 'date_connected') return parseDateYMD(valueEl.textContent.trim()) || '';
+    if (field === 'birthday')      return parseDateDMY(valueEl.textContent.trim()) || '';
+    return valueEl.textContent.trim();
+  }
+
   /** Scrape all contact info sections from the current page */
   function scrapeContactInfo() {
     const result = {};
-    const allPs = document.querySelectorAll('p');
 
-    for (const p of allPs) {
-      const label = p.textContent.trim().toLowerCase();
-      const field = LABEL_MAP[label];
-      if (!field) continue;
+    // Pattern 1: <p> label + <p> value (primary — used by most LinkedIn locales)
+    for (const p of document.querySelectorAll('p')) {
+      const field = LABEL_MAP[p.textContent.trim().toLowerCase()];
+      if (!field || result[field]) continue;
+      const next = p.nextElementSibling;
+      if (!next || next.tagName !== 'P') continue;
+      const value = extractFieldValue(field, next);
+      if (value) result[field] = value;
+    }
 
-      const valueP = p.nextElementSibling;
-      if (!valueP || valueP.tagName !== 'P') continue;
-
-      let value = '';
-      if (field === 'email') {
-        const mailto = valueP.querySelector('a[href^="mailto:"]');
-        value = mailto ? mailto.textContent.trim() : valueP.textContent.trim();
-      } else if (field === 'date_connected') {
-        value = parseDateYMD(valueP.textContent.trim());
-      } else if (field === 'birthday') {
-        value = parseDateDMY(valueP.textContent.trim());
-      } else {
-        value = valueP.textContent.trim();
-      }
-
+    // Pattern 2: <dt> label + <dd> value (fallback — used by some LinkedIn locale variants)
+    for (const dt of document.querySelectorAll('dt')) {
+      const field = LABEL_MAP[dt.textContent.trim().toLowerCase()];
+      if (!field || result[field]) continue; // don't overwrite pattern-1 results
+      const dd = dt.nextElementSibling;
+      if (!dd || dd.tagName !== 'DD') continue;
+      const value = extractFieldValue(field, dd);
       if (value) result[field] = value;
     }
 
@@ -309,4 +323,185 @@ console.log('[Content] Content script loaded on:', window.location.href);
 
   if (document.body) startObserver();
   else document.addEventListener('DOMContentLoaded', startObserver);
+})();
+
+// =============================================================================
+// CHAT SCRAPER — extract messages from a LinkedIn messaging thread on demand.
+// Responds to { type: 'SCRAPE_CHAT' } from the sidepanel via chrome.tabs.sendMessage.
+// Returns { data: { messages, profile_id, customer_id } } or { error: '...' }.
+// =============================================================================
+
+(function initChatScraper() {
+  const THREAD_RE = /linkedin\.com\/messaging\/(thread|conversations)\//i;
+  // URN format: urn:li:msg_message:(urn:li:fsd_profile:PROFILE_ID,MESSAGE_ID)
+  // Also matches older member: and fs_profile: URN variants used by LinkedIn.
+  const URN_RE = /urn:li:(?:msg_message|msg_event):\(urn:li:(?:fsd_profile|member|fs_profile):([A-Za-z0-9_-]+),([^)]+)\)/;
+  const LI_ID_RE = /linkedin\.com\/in\/([A-Za-z0-9_-]+)/i;
+
+  const MONTH_MAP = {};  // kept for potential future use
+
+  // Decode the Unix timestamp (ms) from the base64 message ID embedded in the URN.
+  // URN format: urn:li:msg_message:(urn:li:fsd_profile:PROFILE_ID,2-BASE64==)
+  // Decoded base64 starts with the millisecond timestamp, e.g. "1776083208354b30051-..."
+  function timestampFromUrn(urn) {
+    const b64Match = urn.match(/,2-([A-Za-z0-9+/]+=*)\)/);
+    if (!b64Match) return '';
+    try {
+      const decoded = atob(b64Match[1]);
+      const digits = decoded.match(/^(\d+)/);
+      if (!digits) return '';
+      const date = new Date(parseInt(digits[1], 10));
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      const dd = String(date.getDate()).padStart(2, '0');
+      const hh = String(date.getHours()).padStart(2, '0');
+      const mi = String(date.getMinutes()).padStart(2, '0');
+      const ss = String(date.getSeconds()).padStart(2, '0');
+      return `${mm}/${dd}/${date.getFullYear()} ${hh}:${mi}:${ss}`;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function scrapeChat(cutoffMs = 0) {
+    // Contact LinkedIn ID — from thread header profile link
+    let contactId = null;
+    const profileLinks = document.querySelectorAll(
+      '.msg-thread__top-bar a[href*="/in/"], .msg-entity-lockup a[href*="/in/"], .msg-thread__link-to-profile'
+    );
+    for (const link of profileLinks) {
+      const m = (link.href || '').match(LI_ID_RE);
+      if (m) { contactId = m[1]; break; }
+    }
+
+    // Contact display name — from thread header title element
+    let contactName = '';
+    const nameEl = document.querySelector(
+      '.msg-entity-lockup__entity-title, .msg-thread__headline, h2.msg-conversation-card__participant-names'
+    );
+    if (nameEl) {
+      contactName = nameEl.textContent.trim();
+    } else {
+      // Fallback: parse page title e.g. "Messaging | John Doe | LinkedIn"
+      const titleMatch = document.title.match(/^Messaging\s*[|–-]\s*(.+?)\s*[|–-]/);
+      if (titleMatch) contactName = titleMatch[1].trim();
+    }
+
+    // Primary selectors; fallbacks added for resilience against LinkedIn class renames.
+    const container = document.querySelector(
+      '.msg-s-message-list__container, .msg-s-message-list,' +
+      '.msg-s-message-list__scrollable, [data-view-name="message-list-content"]'
+    );
+    if (!container) return null;
+
+    // Primary: LinkedIn BEM class for message list events.
+    // Fallback: any element with data-event-urn inside a <li>.
+    let messageItems = Array.from(
+      container.querySelectorAll('li.msg-s-message-list__event')
+    );
+    if (messageItems.length === 0) {
+      const urnEls = Array.from(container.querySelectorAll('[data-event-urn]'));
+      const seen = new Set();
+      messageItems = [];
+      for (const urnEl of urnEls) {
+        const li = urnEl.closest('li') || urnEl;
+        if (!seen.has(li)) { seen.add(li); messageItems.push(li); }
+      }
+    }
+    if (messageItems.length === 0) return null;
+
+    const messages = [];
+
+    for (const item of messageItems) {
+      const eventItem = item.querySelector('[data-event-urn]');
+      if (!eventItem) continue;
+
+      const urn = eventItem.getAttribute('data-event-urn') || '';
+      const urnMatch = urn.match(URN_RE);
+      if (!urnMatch) continue;
+
+      const urnProfileId = urnMatch[1];
+      const messageId = urnMatch[2];
+
+      // Primary: BEM modifier class set by LinkedIn
+      const hasBemClass = eventItem.classList.contains('msg-s-event-listitem--other');
+      // Fallback: find a profile link inside the event item and compare its slug to contactId.
+      // LinkedIn always renders a sender avatar/name as an anchor with href="/in/<slug>".
+      // If the slug matches contactId the message is incoming; if it differs it is outgoing.
+      let isFromOtherFallback = null;
+      if (contactId) {
+        const senderLink = eventItem.querySelector('a[href*="/in/"]');
+        if (senderLink) {
+          const slugMatch = (senderLink.href || '').match(LI_ID_RE);
+          if (slugMatch) {
+            isFromOtherFallback = slugMatch[1].toLowerCase() === contactId.toLowerCase();
+          }
+        }
+      }
+      // Prefer BEM class; use link-based fallback if class is absent.
+      // If both signals are absent, direction is unknown — sender_id will be null
+      // and the sidepanel will block sending until the issue is resolved.
+      const directionKnown = hasBemClass || (isFromOtherFallback !== null);
+      const isFromOther = hasBemClass || (isFromOtherFallback === true);
+      const sender_id = directionKnown
+        ? (isFromOther ? (contactId || '') : (urnProfileId || ''))
+        : null; // null = direction could not be determined
+
+      // Try multiple selector variants in case LinkedIn renames the class.
+      const bodyEl = eventItem.querySelector(
+        '.msg-s-event-listitem__body, .msg-s-event__body, .msg-s-event-listitem__message-text'
+      );
+      const content = bodyEl ? bodyEl.innerText.trim() : '';
+
+      const message_date = timestampFromUrn(urn);
+
+      // Apply cutoff filter — skip messages older than the requested period.
+      // timestampFromUrn returns '' if the URN can't be decoded; those always pass through.
+      if (cutoffMs > 0 && message_date) {
+        const [datePart, timePart] = message_date.split(' ');
+        const [mm, dd, yyyy] = datePart.split('/');
+        const msgTs = new Date(`${yyyy}-${mm}-${dd}T${timePart}`).getTime();
+        if (!isNaN(msgTs) && msgTs < cutoffMs) continue;
+      }
+
+      messages.push({
+        message_id: messageId,
+        content,
+        sender_id,
+        message_date,
+      });
+    }
+
+    if (messages.length === 0 && messageItems.length > 0) {
+      // Items were in the DOM but all filtered out by the cutoff date
+      return { messages: [], filtered_empty: true, profile_id: contactId || '', contact_name: contactName };
+    }
+
+    if (messages.length === 0) return null;
+
+    return { messages, profile_id: contactId || '', contact_name: contactName };
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type !== 'SCRAPE_CHAT') return;
+
+    if (!THREAD_RE.test(window.location.href)) {
+      sendResponse({ error: 'Not on a LinkedIn messaging thread. Navigate to a chat first.' });
+      return true;
+    }
+
+    const cutoffMs = message.cutoffMs || 0;
+    const data = scrapeChat(cutoffMs);
+    if (!data) {
+      sendResponse({ error: 'Could not find messages on this page. Scroll down to load them and try again. If messages are visible but this error persists, please contact the developer.' });
+      return true;
+    }
+    if (data.filtered_empty) {
+      sendResponse({ error: `No messages found within the selected period. Try a wider date range or scroll up to load older messages.` });
+      return true;
+    }
+
+    console.log('[Content] SCRAPE_CHAT: found', data.messages.length, 'messages');
+    sendResponse({ data });
+    return true;
+  });
 })();

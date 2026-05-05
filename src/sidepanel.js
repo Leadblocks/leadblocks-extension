@@ -4,9 +4,71 @@
 
 const ALLOWED_USER_TYPES = ['Admin', 'Chatter', 'Backoffice'];
 
+// Appended to errors that indicate a LinkedIn structure change or extension bug.
+// These require a developer fix, not a user action.
+const DEV_MSG = ' Please contact the developer.';
+
+// =============================================================================
+// SESSION PERSISTENCE — survive sidepanel reloads within the same browser session
+// =============================================================================
+
+const SS_ACTIONED  = 'lb_actioned_tasks';
+const SS_CH_SENT   = 'lb_chatter_sent';
+const SS_CH_DISC   = 'lb_chatter_disconnected';
+
+function saveActionedState() {
+  try {
+    sessionStorage.setItem(SS_ACTIONED, JSON.stringify(state.actionedTasks));
+    sessionStorage.setItem(SS_CH_SENT,  JSON.stringify(state.chatterSent));
+    sessionStorage.setItem(SS_CH_DISC,  JSON.stringify(state.chatterDisconnected));
+  } catch (_) {}
+}
+
+/**
+ * After loading a fresh batch of tasks, restore actioned state for any task IDs
+ * that were already handled earlier in this browser session.
+ */
+function restoreActionedStateForTasks(tasks) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(SS_ACTIONED) || '{}');
+    for (const t of tasks) {
+      if (saved[t.id] && !state.actionedTasks[t.id]) state.actionedTasks[t.id] = saved[t.id];
+    }
+  } catch (_) {}
+}
+
+function restoreChatterStateForTasks(tasks) {
+  try {
+    const savedSent = JSON.parse(sessionStorage.getItem(SS_CH_SENT) || '{}');
+    const savedDisc = JSON.parse(sessionStorage.getItem(SS_CH_DISC) || '{}');
+    for (const t of tasks) {
+      const tid = t.documentId;
+      if (savedSent[tid] && !state.chatterSent[tid])       state.chatterSent[tid]       = savedSent[tid];
+      if (savedDisc[tid] && !state.chatterDisconnected[tid]) state.chatterDisconnected[tid] = savedDisc[tid];
+    }
+  } catch (_) {}
+}
+
+// =============================================================================
+// TOKEN EXPIRY HANDLER
+// =============================================================================
+
+/** Called by apiGet / apiPost when the server returns 401/403. */
+function handleSessionExpired() {
+  setTimeout(async () => {
+    await clearAuth();
+    Object.assign(state, { token: null, view: 'login', error: null });
+    render();
+    setTimeout(() => {
+      const errEl = document.getElementById('login-error');
+      if (errEl) { errEl.textContent = 'Session expired. Please sign in again.'; errEl.style.display = 'block'; }
+    }, 50);
+  }, 0);
+}
+
 const STEPS = [
   { key: 'connection_acceptance', label: 'Connection Acceptance', enabled: true, requiresType: ['Admin', 'Backoffice'] },
-  { key: 'messaging', label: 'Messaging', enabled: false, requiresType: ['Admin', 'Backoffice'] },
+  { key: 'chat_scraper', label: 'Messaging', enabled: true, requiresType: ['Admin', 'Backoffice', 'Chatter'] },
   { key: 'connection_request', label: 'Connection Request', enabled: true, requiresType: ['Admin', 'Backoffice'] },
   { key: 'follow_up', label: 'Follow-Up', enabled: true, requiresType: ['Admin', 'Backoffice'] },
   { key: 'revoke_connection_request', label: 'Revoke Connection Request', enabled: true, requiresType: ['Admin', 'Backoffice'] },
@@ -81,6 +143,20 @@ const state = {
   // Connection acceptance (step 1) state
   acceptanceResult: null,  // null | { status, task?, message? }
 
+  // Chat Scraper state
+  chatScraper: {
+    status: 'idle',    // 'idle' | 'scraping' | 'ready' | 'sending'
+    messages: [],
+    profile_id: '',
+    customer_id: '',
+    contact_name: '',  // display name of the prospect
+    thread_url: '',    // URL of the scraped thread
+    sentCount: null,   // null | number — set after a successful send
+    error: null,
+    scraperDays: 7,    // period filter: 7 | 31 | 0 (0 = all time)
+    manualSenderOverrides: {}, // messageId → 'sent' | 'received'
+  },
+
   // UI
   view: 'login',          // 'login' | 'main'
   viewMode: 'queue',      // 'queue' | 'list'
@@ -147,6 +223,10 @@ async function apiGet(path) {
   const res = await fetch(fullUrl, {
     headers: { Authorization: `Bearer ${state.token}` },
   });
+  if (res.status === 401 || res.status === 403) {
+    handleSessionExpired();
+    throw new Error('Session expired. Please sign in again.');
+  }
   if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
   return res.json();
 }
@@ -165,6 +245,10 @@ async function apiPost(path, body) {
     },
     body: JSON.stringify(body),
   });
+  if (res.status === 401 || res.status === 403) {
+    handleSessionExpired();
+    throw new Error('Session expired. Please sign in again.');
+  }
   if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
   return res.json();
 }
@@ -225,7 +309,7 @@ async function fetchCustomers() {
     const batch = (data.data || []).map(c => ({
       id: c.id,
       customer_name: c.customer_name,
-      profiles: (c.profiles || []).map(p => ({ id: p.id, profile_name: p.profile_name })),
+      profiles: (c.profiles || []).map(p => ({ id: p.id, profile_name: p.profile_name, profile_id: p.profile_id || '' })),
     }));
     all = all.concat(batch);
     if (all.length >= (data.meta?.pagination?.total || 0)) break;
@@ -316,6 +400,8 @@ async function loadAllTasks() {
           ? task.tags_relation.slice()
           : [];
       }
+      // Restore chatter sent/disconnected state from this browser session
+      restoreChatterStateForTasks(all);
       // Fire-and-forget: load all available tags for the tag picker
       loadAvailableTags();
     } else {
@@ -340,8 +426,11 @@ async function loadAllTasks() {
       }
     }
 
-    state.tasks = all;
-    state.totalTasks = all.length;
+      // Restore actioned state for any task IDs already handled this session
+      restoreActionedStateForTasks(all);
+
+      state.tasks = all;
+      state.totalTasks = all.length;
   } catch (err) {
     state.error = err.message;
   } finally {
@@ -393,6 +482,7 @@ async function lookupConnection() {
 async function handleConnect(taskId) {
   const task = state.tasks.find(t => String(t.id) === String(taskId));
   if (!task) return;
+  if (state.actionedTasks[taskId]) return; // guard double-click
   const contact = state.contactDetails[taskId] || {};
 
   // Check if Date Connected is filled
@@ -401,6 +491,8 @@ async function handleConnect(taskId) {
     return;
   }
 
+  state.actionedTasks[taskId] = 'sending';
+  render();
   try {
     await apiPost('/api/data-senders/connect', {
       ...task,
@@ -410,6 +502,7 @@ async function handleConnect(taskId) {
       date_connected: contact.date_connected || '',
     });
     state.actionedTasks[taskId] = 'connected';
+    saveActionedState();
     showToast('Connection confirmation sent!', 'success');
     if (state.viewMode === 'queue') {
       setTimeout(advanceQueue, 600);
@@ -417,42 +510,60 @@ async function handleConnect(taskId) {
       render();
     }
   } catch (err) {
+    delete state.actionedTasks[taskId];
     showToast('Error: ' + err.message, 'error');
+    render();
   }
 }
 
 async function handleConnectionRequest(taskId) {
   const task = state.tasks.find(t => String(t.id) === String(taskId));
   if (!task) return;
+  if (state.actionedTasks[taskId]) return; // guard double-click
+  state.actionedTasks[taskId] = 'sending'; // optimistic lock
+  render();
   try {
     await apiPost('/api/data-senders/connection_request', task);
     state.actionedTasks[taskId] = 'sent';
+    saveActionedState();
     showToast('Connection request sent!', 'success');
     render();
   } catch (err) {
+    delete state.actionedTasks[taskId];
     showToast('Error: ' + err.message, 'error');
+    render();
   }
 }
 
 async function handleFollowUp(taskId) {
   const task = state.tasks.find(t => String(t.id) === String(taskId));
   if (!task) return;
+  if (state.actionedTasks[taskId]) return; // guard double-click
+  state.actionedTasks[taskId] = 'sending'; // optimistic lock
+  render();
   try {
     await apiPost('/api/extension/follow-up', task);
     state.actionedTasks[taskId] = 'sent';
+    saveActionedState();
     showToast('Follow-up sent!', 'success');
     render();
   } catch (err) {
+    delete state.actionedTasks[taskId];
     showToast('Error: ' + err.message, 'error');
+    render();
   }
 }
 
 async function handleRevoke(taskId) {
   const task = state.tasks.find(t => String(t.id) === String(taskId));
   if (!task) return;
+  if (state.actionedTasks[taskId]) return;
+  state.actionedTasks[taskId] = 'sending';
+  render();
   try {
     await apiPost('/api/data-senders/revoke', task);
     state.actionedTasks[taskId] = 'revoked';
+    saveActionedState();
     showToast('Revoke confirmation sent!', 'success');
     if (state.viewMode === 'queue') {
       setTimeout(advanceQueue, 600);
@@ -460,16 +571,22 @@ async function handleRevoke(taskId) {
       render();
     }
   } catch (err) {
+    delete state.actionedTasks[taskId];
     showToast('Error: ' + err.message, 'error');
+    render();
   }
 }
 
 async function handleDisconnect(taskId) {
   const task = state.tasks.find(t => String(t.id) === String(taskId));
   if (!task) return;
+  if (state.actionedTasks[taskId]) return;
+  state.actionedTasks[taskId] = 'sending';
+  render();
   try {
     await apiPost('/api/data-senders/disconnect', task);
     state.actionedTasks[taskId] = 'disconnected';
+    saveActionedState();
     showToast('Prospect disconnected!', 'success');
     if (state.viewMode === 'queue') {
       setTimeout(advanceQueue, 600);
@@ -477,7 +594,9 @@ async function handleDisconnect(taskId) {
       render();
     }
   } catch (err) {
+    delete state.actionedTasks[taskId];
     showToast('Error: ' + err.message, 'error');
+    render();
   }
 }
 
@@ -578,6 +697,7 @@ function buildLogin() {
 // --- Main ---
 
 function buildMain() {
+  const step = STEPS[state.currentStep];
   return `
     <div class="header">
       <img src="../assets/logo.png" alt="Leadblocks" class="logo" />
@@ -621,6 +741,7 @@ function buildFilters() {
   const profiles = getAvailableProfiles();
   const step = STEPS[state.currentStep];
   const isAcceptance = step.key === 'connection_acceptance';
+  const isMessaging  = step.key === 'chat_scraper';
 
   const filtersChanged =
     state.pendingProfileId !== state.appliedProfileId ||
@@ -645,6 +766,30 @@ function buildFilters() {
   const campaignOptions = state.campaigns
     .map(c => `<option value="${c.id}" ${state.pendingCampaignId === String(c.id) ? 'selected' : ''}>${c.live ? '🟢 ' : ''}${esc(c.campaign_name)}</option>`)
     .join('');
+
+  // Messaging tab: only customer + profile, no apply button
+  if (isMessaging) {
+    return `
+      <div class="filters">
+        <div class="filter-row">
+          <div class="filter-field">
+            <label>Customer <button id="btn-refresh-customers" class="btn-refresh" title="Refresh customers & profiles" ${state.loadingCustomers ? 'disabled' : ''}>${state.loadingCustomers ? '⟳' : '↻'}</button></label>
+            <select id="sel-customer" ${state.loadingCustomers ? 'disabled' : ''}>
+              <option value="">— select —</option>
+              ${customerOptions}
+            </select>
+          </div>
+          <div class="filter-field">
+            <label>Profile</label>
+            <select id="sel-profile" ${profiles.length === 0 ? 'disabled' : ''}>
+              <option value="">— select —</option>
+              ${profileOptions}
+            </select>
+          </div>
+        </div>
+      </div>
+    `;
+  }
 
   return `
     <div class="filters">
@@ -703,6 +848,11 @@ function buildFilters() {
 
 function buildTaskArea() {
   const step = STEPS[state.currentStep];
+
+  // Chat Scraper step — fully self-contained, no profile/task guards needed
+  if (step.key === 'chat_scraper') {
+    return buildChatScraperArea();
+  }
 
   // Steps 2-5 are not yet implemented
   if (!step.enabled) {
@@ -920,6 +1070,7 @@ function buildConnectionRequestList() {
           ${campaignHtml}
           <span class="revoke-actions">
             <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="connection_request" data-tid="${task.id}"${!isActive ? ' disabled title="Navigate to this profile to enable the Send button"' : ''}>Send</button>
+            ${!isActioned && !isActive && task.profile_url ? `<button class="btn btn-ghost btn-xs" data-action="force_cr" data-tid="${task.id}" title="Force send: use only if this prospect's LinkedIn URL has changed">Force</button>` : ''}
           </span>
         </div>
         ${task.content ? `
@@ -1281,6 +1432,7 @@ async function handleChatterSendMessage(tid) {
       follow_up_date: followUp ? followUpDate : null,
     });
     state.chatterSent[tid] = 'message';
+    saveActionedState();
     showToast('Message sent successfully!');
     render();
   } catch (err) {
@@ -1309,6 +1461,7 @@ async function handleChatterForwardClient(tid) {
       selected_tag_ids: selectedTagIds,
     });
     state.chatterSent[tid] = 'forwarded';
+    saveActionedState();
     showToast('Forwarded to client successfully!');
     render();
   } catch (err) {
@@ -1331,6 +1484,7 @@ async function handleChatterBackCampaign(tid) {
       selected_tag_ids: selectedTagIds,
     });
     state.chatterSent[tid] = 'back_campaign';
+    saveActionedState();
     showToast('Sent back to campaign successfully!');
     render();
   } catch (err) {
@@ -1347,6 +1501,7 @@ async function handleChatterDisconnect(tid) {
       documentId: tid,
     });
     state.chatterDisconnected[tid] = true;
+    saveActionedState();
     showToast('Prospect disconnected successfully!');
     render();
   } catch (err) {
@@ -1493,6 +1648,131 @@ function buildChatPopup() {
         <div class="ct-cc-body">${body}</div>
       </div>
     </div>
+  `;
+}
+
+// --- Chat Scraper ---
+
+function buildChatScraperArea() {
+  const cs = state.chatScraper;
+  const isOnThread = /linkedin\.com\/messaging\/(thread|conversations)\//i.test(state.currentTabUrl);
+
+  const scrapeDisabled = cs.status === 'scraping' || cs.status === 'sending';
+
+  const hasValidIds    = !!(cs.profile_id && cs.customer_id);
+  const unknownSenderCount = cs.messages.filter(
+    m => m.sender_id === null && !cs.manualSenderOverrides?.[m.message_id]
+  ).length;
+  const hasValidMsgs   = cs.messages.length > 0 &&
+                         cs.messages.every(m => m.message_id && m.message_date) &&
+                         unknownSenderCount === 0;
+  const sendDisabled   = cs.status !== 'ready' || !hasValidIds || !hasValidMsgs;
+
+  const toolbar = `
+    <div class="cs-toolbar">
+      <select id="sel-scraper-days" class="cs-days-select" ${scrapeDisabled ? 'disabled' : ''}>
+        <option value="7"  ${cs.scraperDays === 7  ? 'selected' : ''}>7 Days</option>
+        <option value="31" ${cs.scraperDays === 31 ? 'selected' : ''}>31 Days</option>
+        <option value="0"  ${cs.scraperDays === 0  ? 'selected' : ''}>All Time</option>
+      </select>
+      <button id="btn-scrape-chat" class="btn btn-secondary" ${scrapeDisabled ? 'disabled' : ''}>
+        ${cs.status === 'scraping' ? '⟳ Scraping…' : '🔍 Scrape Chat'}
+      </button>
+      <button id="btn-send-chat" class="btn btn-primary" ${sendDisabled ? 'disabled' : ''}>
+        ${cs.status === 'sending' ? '⟳ Sending…' : 'Send to Backend'}
+      </button>
+    </div>
+  `;
+
+  if (!isOnThread && cs.status === 'idle') {
+    return `
+      <div class="empty-state" style="margin-bottom:12px">
+        Navigate to a LinkedIn messaging thread, then click <strong>Scrape Chat</strong>.
+      </div>
+      ${toolbar}
+    `;
+  }
+
+  if (cs.error) {
+    return toolbar + `<div class="error-msg" style="margin-top:8px">${esc(cs.error)}</div>`;
+  }
+
+  if (cs.status === 'idle') {
+    return toolbar;
+  }
+
+  if (cs.status === 'scraping') {
+    return toolbar + `<div class="loading" style="margin-top:16px"><div class="spinner"></div><span>Scraping messages…</span></div>`;
+  }
+
+  // ready or sending — show message list
+  const sentBanner = cs.sentCount !== null
+    ? `<div class="cs-sent-banner">${cs.sentCount === 0 ? '✓ Already up to date — no new messages.' : `✓ ${cs.sentCount} new message${cs.sentCount !== 1 ? 's' : ''} sent to backend.`}</div>`
+    : '';
+
+  const threadLabel = (() => {
+    if (!cs.profile_id && !cs.contact_name) return '';
+    const name = cs.contact_name || cs.profile_id;
+    const url = cs.thread_url || `https://www.linkedin.com/in/${cs.profile_id}/`;
+    return `<span class="cs-id" title="LinkedIn: ${esc(url)}">Chat with: <strong>${esc(name)}</strong></span>`;
+  })();
+
+  const infoBar = `
+    <div class="cs-info-bar">
+      <span><strong>${cs.messages.length}</strong> message${cs.messages.length !== 1 ? 's' : ''}</span>
+      ${threadLabel}
+      <span class="cs-id" title="Your LinkedIn ID: ${esc(cs.customer_id)}">Profile: <code>${esc(cs.customer_id.slice(0, 6))}…</code></span>
+      <span class="cs-id" title="Contact LinkedIn ID: ${esc(cs.profile_id)}">Prospect: <code>${esc(cs.profile_id.slice(0, 6))}…</code></span>
+    </div>
+  `;
+
+  const unknownSenderBanner = unknownSenderCount > 0
+    ? `<div class="warn-msg" style="margin-bottom:8px">⚠ ${unknownSenderCount} message${unknownSenderCount !== 1 ? 's' : ''} could not determine sender direction. Choose <strong>Sent by me</strong> or <strong>Received</strong> for each highlighted message below before sending.</div>`
+    : '';
+
+  // When the contact's LinkedIn ID could not be scraped, all messages will have
+  // unknown sender direction and send is blocked. Show a targeted explanation.
+  const missingContactBanner = (cs.status === 'ready' && !cs.profile_id)
+    ? `<div class="error-msg" style="margin-bottom:8px">⚠ Could not find the contact’s LinkedIn ID in this thread. Sender direction cannot be determined and sending is blocked.${esc(DEV_MSG)}</div>`
+    : '';
+
+  const msgList = cs.messages.map(m => {
+    const override = cs.manualSenderOverrides?.[m.message_id];
+    const isUnknown = m.sender_id === null && !override;
+    const isSent = (m.sender_id !== null && m.sender_id === cs.customer_id) || override === 'sent';
+    const rowClass = isUnknown ? 'center' : (isSent ? 'right' : 'left');
+    const bubbleClass = isUnknown ? 'unknown' : (isSent ? 'me' : 'prospect');
+    const undoBtn = override
+      ? `<button class="cs-undo-btn" data-cs-override data-msg-id="${esc(m.message_id)}" data-direction="">↩ Undo</button>`
+      : '';
+    const unknownControls = isUnknown
+      ? `<div class="ct-chat-unknown-label">⚠ Unknown sender — choose:</div>
+         <div class="cs-sender-btns">
+           <button class="cs-sender-btn" data-cs-override data-msg-id="${esc(m.message_id)}" data-direction="sent">Sent by me</button>
+           <button class="cs-sender-btn" data-cs-override data-msg-id="${esc(m.message_id)}" data-direction="received">Received</button>
+         </div>`
+      : '';
+    return `
+      <div class="ct-chat-row ${rowClass}">
+        <div class="ct-chat-bubble ${bubbleClass}">
+          ${unknownControls}
+          <div class="ct-cc-text">${esc(m.content || '(no content)')}</div>
+          ${m.message_date ? `<div class="ct-chat-date">${esc(m.message_date)}</div>` : ''}
+          ${undoBtn}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    ${toolbar}
+    <div class="cs-scroll-note">ℹ Only messages currently loaded in the LinkedIn chat window are scraped. Scroll up in LinkedIn to load older messages before scraping.</div>
+    ${sentBanner}
+    ${unknownSenderBanner}
+    ${missingContactBanner}
+    ${infoBar}
+    <div class="cs-msg-list">${msgList}</div>
+    ${cs.status === 'sending' ? `<div class="loading" style="margin-top:8px"><div class="spinner"></div><span>Deduplicating &amp; sending…</span></div>` : ''}
   `;
 }
 
@@ -1723,7 +2003,7 @@ function setupGlobalDelegation() {
       const newStep = STEPS[state.currentStep];
       // Auto-load tasks for the new step using the already-applied filters,
       // so the user doesn't have to press Apply again after switching steps.
-      if (newStep.key !== 'connection_acceptance' && newStep.enabled && state.appliedProfileId) {
+      if (newStep.key !== 'connection_acceptance' && newStep.key !== 'chat_scraper' && newStep.enabled && state.appliedProfileId) {
         loadAllTasks();
       } else {
         render();
@@ -1776,11 +2056,34 @@ function setupGlobalDelegation() {
         case 'disconnect':           handleDisconnect(tid); break;
         case 'connection_request':   handleConnectionRequest(tid); break;
         case 'follow_up':             handleFollowUp(tid); break;
+        case 'force_cr':              handleConnectionRequest(tid); break;
+        case 'force_fu':              handleFollowUp(tid); break;
         case 'skip':
           state.currentIndex = Math.min(state.currentIndex + 1, state.tasks.length - 1);
           render();
           break;
       }
+    }
+
+    // Manual sender override (Sent by me / Received / Undo) for unknown-sender chat messages
+    const overrideBtn = e.target.closest('[data-cs-override]');
+    if (overrideBtn) {
+      const msgId = overrideBtn.dataset.msgId;
+      const dir   = overrideBtn.dataset.direction;
+      if (!state.chatScraper.manualSenderOverrides) state.chatScraper.manualSenderOverrides = {};
+      if (dir) {
+        state.chatScraper.manualSenderOverrides[msgId] = dir;
+      } else {
+        delete state.chatScraper.manualSenderOverrides[msgId];
+      }
+      const _list = document.querySelector('.cs-msg-list');
+      const _savedScroll = _list ? _list.scrollTop : 0;
+      render();
+      requestAnimationFrame(() => {
+        const _newList = document.querySelector('.cs-msg-list');
+        if (_newList) _newList.scrollTop = _savedScroll;
+      });
+      return;
     }
 
     // Chatter task action buttons
@@ -2064,6 +2367,113 @@ function attachListeners() {
   // First-connection connect button (step 1)
   el('btn-fc-connect')?.addEventListener('click', () => {
     handleFirstConnectionConnect();
+  });
+
+  // Chat Scraper — period dropdown
+  el('sel-scraper-days')?.addEventListener('change', e => {
+    state.chatScraper.scraperDays = Number(e.target.value);
+  });
+
+  // Chat Scraper — Scrape Chat button
+  el('btn-scrape-chat')?.addEventListener('click', () => {
+    state.chatScraper.status = 'scraping';
+    state.chatScraper.error = null;
+    state.chatScraper.sentCount = null;
+    render();
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      const tabId = tabs[0]?.id;
+      const tabUrl = tabs[0]?.url || '';
+      if (!tabId) {
+        state.chatScraper.status = 'idle';
+        state.chatScraper.error = 'No active tab found.';
+        render();
+        return;
+      }
+      const days = state.chatScraper.scraperDays;
+      const cutoffMs = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : 0;
+      chrome.tabs.sendMessage(tabId, { type: 'SCRAPE_CHAT', cutoffMs }, response => {
+        if (chrome.runtime.lastError || !response) {
+          state.chatScraper.status = 'idle';
+          state.chatScraper.error = 'Could not reach the LinkedIn page. Try reloading it. If the problem persists,' + DEV_MSG;
+          render();
+          return;
+        }
+        if (response.error) {
+          state.chatScraper.status = 'idle';
+          state.chatScraper.error = response.error;
+          render();
+          return;
+        }
+        const { messages, profile_id, contact_name } = response.data;
+        // Use the selected profile's LinkedIn ID as customer_id
+        const customer = state.customers.find(c => String(c.id) === state.pendingCustomerId);
+        const profile = (customer?.profiles || []).find(p => String(p.id) === state.pendingProfileId);
+        const customer_id = profile?.profile_id || '';
+        state.chatScraper.status = 'ready';
+        state.chatScraper.messages = messages;
+        state.chatScraper.profile_id = profile_id;
+        state.chatScraper.customer_id = customer_id;
+        state.chatScraper.contact_name = contact_name || '';
+        state.chatScraper.thread_url = tabUrl;
+        state.chatScraper.sentCount = null;
+        state.chatScraper.manualSenderOverrides = {};
+        render();
+        requestAnimationFrame(() => {
+          const list = document.querySelector('.cs-msg-list');
+          if (list) list.scrollTop = list.scrollHeight;
+        });
+      });
+    });
+  });
+
+  // Chat Scraper — Send to Backend button
+  el('btn-send-chat')?.addEventListener('click', async () => {
+    if (state.chatScraper.status !== 'ready') return;
+    state.chatScraper.status = 'sending';
+    state.chatScraper.sentCount = null;
+    render();
+    try {
+      const cs = state.chatScraper;
+      const allIds = cs.messages.map(m => m.message_id).filter(Boolean);
+      const checkRes = await apiPost('/api/messages/check-existing', { message_ids: allIds });
+      const existingSet = new Set(checkRes.existing || []);
+      const newMessages = cs.messages.filter(m => !existingSet.has(m.message_id));
+
+      if (newMessages.length === 0) {
+        state.chatScraper.status = 'ready';
+        state.chatScraper.sentCount = 0;
+        render();
+        return;
+      }
+
+      // Apply manual sender overrides (for messages where sender could not be auto-detected)
+      const resolvedMessages = newMessages.map(m => {
+        if (m.sender_id !== null) return m;
+        const override = cs.manualSenderOverrides?.[m.message_id];
+        if (override === 'sent')     return { ...m, sender_id: cs.customer_id };
+        if (override === 'received') return { ...m, sender_id: cs.profile_id };
+        return m;
+      });
+
+      await apiPost('/api/data-receivers', {
+        data: {
+          data_type: 'robot_linkedin_chat',
+          raw_data: {
+            messages: resolvedMessages,
+            profile_id: cs.profile_id,
+            customer_id: cs.customer_id,
+          },
+        },
+      });
+
+      state.chatScraper.status = 'ready';
+      state.chatScraper.sentCount = newMessages.length;
+      render();
+    } catch (err) {
+      state.chatScraper.status = 'ready';
+      state.chatScraper.error = 'Send failed: ' + err.message + DEV_MSG;
+      render();
+    }
   });
 }
 

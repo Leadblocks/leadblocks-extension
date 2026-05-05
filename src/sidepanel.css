@@ -711,6 +711,15 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   font-size: 12px;
 }
 
+.warn-msg {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
 /* ===== Toast ===== */
 .toast {
   position: fixed;
@@ -1005,6 +1014,8 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   word-break: break-word;
   color: #334155;
   cursor: pointer;
+  max-height: 100px;
+  overflow-y: auto;
 }
 
 .cr-copy-btn {
@@ -1303,16 +1314,74 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
 }
 
 .ct-chat-bubble.prospect {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  color: #1e293b;
+  background: #e5e7eb;
+  color: #111827;
   border-bottom-left-radius: 2px;
 }
 
 .ct-chat-bubble.me {
-  background: var(--navy, #0f172a);
+  background: var(--navy);
   color: #fff;
   border-bottom-right-radius: 2px;
+}
+
+.ct-chat-bubble.unknown {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  max-width: 90%;
+}
+
+.ct-chat-unknown-label {
+  font-size: 10px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  opacity: 0.8;
+}
+
+.cs-sender-btns {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+
+.cs-sender-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid #92400e;
+  background: rgba(146, 64, 14, 0.1);
+  color: #92400e;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.cs-sender-btn:hover {
+  background: rgba(146, 64, 14, 0.22);
+}
+
+.cs-undo-btn {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: 0.6;
+  padding: 0;
+  text-decoration: underline;
+  font-family: inherit;
+  color: inherit;
+}
+
+.cs-undo-btn:hover {
+  opacity: 1;
+}
+
+.ct-chat-row.center {
+  justify-content: center;
 }
 
 .ct-chat-date {
@@ -1485,4 +1554,79 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
 
 .hint-link:hover {
   color: var(--primary);
+}
+
+/* ===== Chat Scraper ===== */
+.cs-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.cs-toolbar .btn {
+  flex: 1;
+}
+
+.cs-days-select {
+  flex: 1;
+  font-size: 12px;
+  padding: 0 6px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.cs-scroll-note {
+  font-size: 10px;
+  color: var(--muted);
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.cs-info-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--muted-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.cs-id code {
+  font-size: 10px;
+  background: var(--border);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.cs-sent-banner {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--success);
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+
+.cs-msg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 55vh;
+  overflow-y: auto;
+  padding: 4px 0;
 }
