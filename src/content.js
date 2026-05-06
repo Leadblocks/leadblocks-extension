@@ -420,7 +420,7 @@ console.log('[Content] Content script loaded on:', window.location.href);
       if (!urnMatch) continue;
 
       const urnProfileId = urnMatch[1];
-      const messageId = urnMatch[2];
+      const messageId = urnMatch[2].replace(/^\d+-/, '');
 
       // Primary: BEM modifier class set by LinkedIn
       const hasBemClass = eventItem.classList.contains('msg-s-event-listitem--other');

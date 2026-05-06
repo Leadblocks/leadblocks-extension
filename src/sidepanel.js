@@ -1663,8 +1663,9 @@ function buildChatScraperArea() {
   const unknownSenderCount = cs.messages.filter(
     m => m.sender_id === null && !cs.manualSenderOverrides?.[m.message_id]
   ).length;
+  const MESSAGE_ID_RE  = /^[A-Za-z0-9+/]+=*$/;
   const hasValidMsgs   = cs.messages.length > 0 &&
-                         cs.messages.every(m => m.message_id && m.message_date) &&
+                         cs.messages.every(m => m.message_id && MESSAGE_ID_RE.test(m.message_id) && m.message_date) &&
                          unknownSenderCount === 0;
   const sendDisabled   = cs.status !== 'ready' || !hasValidIds || !hasValidMsgs;
 
