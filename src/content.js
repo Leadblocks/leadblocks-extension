@@ -387,18 +387,20 @@ console.log('[Content] Content script loaded on:', window.location.href);
     }
 
     // Primary selectors; fallbacks added for resilience against LinkedIn class renames.
+    // Note: the actual outer class is msg-s-message-list-container (hyphens only),
+    // but the inner scrollable div has msg-s-message-list, which is what we want.
     const container = document.querySelector(
-      '.msg-s-message-list__container, .msg-s-message-list,' +
+      '.msg-s-message-list__container, .msg-s-message-list, .msg-s-message-list-container,' +
       '.msg-s-message-list__scrollable, [data-view-name="message-list-content"]'
     );
-    if (!container) return null;
 
     // Primary: LinkedIn BEM class for message list events.
-    // Fallback: any element with data-event-urn inside a <li>.
-    let messageItems = Array.from(
-      container.querySelectorAll('li.msg-s-message-list__event')
-    );
-    if (messageItems.length === 0) {
+    let messageItems = container
+      ? Array.from(container.querySelectorAll('li.msg-s-message-list__event'))
+      : [];
+
+    // Fallback 1: any element with data-event-urn inside the container.
+    if (messageItems.length === 0 && container) {
       const urnEls = Array.from(container.querySelectorAll('[data-event-urn]'));
       const seen = new Set();
       messageItems = [];
@@ -407,6 +409,18 @@ console.log('[Content] Content script loaded on:', window.location.href);
         if (!seen.has(li)) { seen.add(li); messageItems.push(li); }
       }
     }
+
+    // Fallback 2: document-wide search — LinkedIn may have renamed or removed the
+    // container class entirely. URN_RE inside the loop filters out non-messaging URNs.
+    if (messageItems.length === 0) {
+      const urnEls = Array.from(document.querySelectorAll('[data-event-urn]'));
+      const seen = new Set();
+      for (const urnEl of urnEls) {
+        const li = urnEl.closest('li') || urnEl;
+        if (!seen.has(li)) { seen.add(li); messageItems.push(li); }
+      }
+    }
+
     if (messageItems.length === 0) return null;
 
     const messages = [];
