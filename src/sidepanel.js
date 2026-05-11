@@ -68,7 +68,7 @@ function handleSessionExpired() {
 
 const STEPS = [
   { key: 'connection_acceptance', label: 'Connection Acceptance', enabled: true, requiresType: ['Admin', 'Backoffice'] },
-  { key: 'chat_scraper', label: 'Messaging', enabled: true, requiresType: ['Admin', 'Backoffice', 'Chatter'] },
+  { key: 'chat_scraper', label: 'Messaging', enabled: true, requiresType: ['Admin', 'Backoffice'] },
   { key: 'connection_request', label: 'Connection Request', enabled: true, requiresType: ['Admin', 'Backoffice'] },
   { key: 'follow_up', label: 'Follow-Up', enabled: true, requiresType: ['Admin', 'Backoffice'] },
   { key: 'revoke_connection_request', label: 'Revoke Connection Request', enabled: true, requiresType: ['Admin', 'Backoffice'] },
