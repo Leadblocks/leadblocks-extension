@@ -222,7 +222,7 @@ console.log('[Content] Content script loaded on:', window.location.href);
     'e-mail': 'email', 'email': 'email',
     'telefoon': 'phone', 'phone': 'phone',
     'verjaardag': 'birthday', 'birthday': 'birthday',
-    'connectie sinds': 'date_connected', 'connected since': 'date_connected',
+    'connectie sinds': 'date_connected', 'connected since': 'date_connected', 'verbonden': 'date_connected', 'connected': 'date_connected',
   };
 
   /** Parse "day month year" or "month day year" → YYYY-MM-DD */
