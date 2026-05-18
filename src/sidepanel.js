@@ -132,6 +132,7 @@ const state = {
   chatterAction: {},      // taskDocId -> 'send_message' | 'forward_client' | 'back_campaign' | 'disconnect'
   chatterSent: {},        // taskDocId -> 'message' | 'forwarded' | 'back_campaign'
   chatterDisconnected: {},// taskDocId -> true
+  disconnectPending: {},  // unused — kept for compatibility
   chatterFollowUp: {},    // taskDocId -> bool (controls follow-up date visibility)
   chatterTaskTags: {},    // taskDocId -> array of {id, tag_name, colour, is_standard}
   chatterTagSelectorOpen: {}, // taskDocId -> bool (is the tag dropdown open)
@@ -578,7 +579,8 @@ async function handleRevoke(taskId) {
 }
 
 async function handleDisconnect(taskId) {
-  const task = state.tasks.find(t => String(t.id) === String(taskId));
+  const task = state.tasks.find(t => String(t.id) === String(taskId))
+    || (state.acceptanceResult?.task && String(state.acceptanceResult.task.id) === String(taskId) ? state.acceptanceResult.task : null);
   if (!task) return;
   if (state.actionedTasks[taskId]) return;
   state.actionedTasks[taskId] = 'sending';
@@ -846,6 +848,10 @@ function buildFilters() {
 
 // --- Task area ---
 
+function buildDisconnectBtn(tid, size = 'btn-sm') {
+  return `<button class="btn btn-danger ${size}" data-action="disconnect" data-tid="${esc(tid)}">Disconnect</button>`;
+}
+
 function buildTaskArea() {
   const step = STEPS[state.currentStep];
 
@@ -963,7 +969,7 @@ function buildConnectionAcceptanceArea() {
         <div class="task-actions">
           <button class="btn btn-primary btn-sm" data-action="connect" data-tid="${task.id}">Connect</button>
           <button class="btn btn-revoke btn-sm" data-action="revoke" data-tid="${task.id}">Revoke</button>
-          <button class="btn btn-danger btn-sm" data-action="disconnect" data-tid="${task.id}">Disconnect</button>
+          ${buildDisconnectBtn(task.id, 'btn-sm')}
         </div>
       </div>
     `;
@@ -1071,6 +1077,7 @@ function buildConnectionRequestList() {
           <span class="revoke-actions">
             <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="connection_request" data-tid="${task.id}"${!isActive ? ' disabled title="Navigate to this profile to enable the Send button"' : ''}>Send</button>
             ${!isActioned && !isActive && task.profile_url ? `<button class="btn btn-ghost btn-xs" data-action="force_cr" data-tid="${task.id}" title="Force send: use only if this prospect's LinkedIn URL has changed">Force</button>` : ''}
+            ${buildDisconnectBtn(task.id, 'btn-xs')}
           </span>
         </div>
         ${task.content ? `
@@ -1149,6 +1156,7 @@ function buildFollowUpList() {
           ${campaignHtml}
           <span class="revoke-actions">
             <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="follow_up" data-tid="${task.id}">Send</button>
+            ${buildDisconnectBtn(task.id, 'btn-xs')}
           </span>
         </div>
         ${task.content ? `
@@ -1809,6 +1817,7 @@ function buildRevokeList() {
           ${campaignHtml}
           <span class="revoke-actions">
             <button class="btn btn-revoke btn-xs" data-action="revoke" data-tid="${task.id}">Revoke</button>
+            ${buildDisconnectBtn(task.id, 'btn-xs')}
           </span>
         </div>
       </div>
@@ -1906,7 +1915,7 @@ function buildQueueCard(task) {
       <div class="task-actions">
         ${isRevoke ? '' : `<button class="btn btn-primary btn-sm" data-action="connect" data-tid="${task.id}">Connect</button>`}
         ${isRevoke ? `<button class="btn btn-revoke btn-sm" data-action="revoke" data-tid="${task.id}">Revoke</button>` : ''}
-        <button class="btn btn-danger btn-sm" data-action="disconnect" data-tid="${task.id}">Disconnect</button>
+        ${buildDisconnectBtn(task.id, 'btn-sm')}
         <button class="btn btn-ghost btn-sm" data-action="skip" data-tid="${task.id}">Skip →</button>
       </div>
     </div>
@@ -1942,7 +1951,7 @@ function buildListCard(task) {
           <span class="flex-1"></span>
           ${isActioned
             ? `<span class="actioned-inline">${esc(state.actionedTasks[task.id])}</span>`
-            : `<button class="btn btn-danger btn-xs" data-action="disconnect" data-tid="${task.id}">Disconnect</button>`
+            : buildDisconnectBtn(task.id, 'btn-xs')
           }
         </div>
         ${task.profile_url ? `<a href="${esc(task.profile_url)}" class="list-url" target="_blank">${esc(task.profile_url)}</a>` : ''}
@@ -2054,7 +2063,11 @@ function setupGlobalDelegation() {
       switch (actionBtn.dataset.action) {
         case 'connect':              handleConnect(tid); break;
         case 'revoke':               handleRevoke(tid); break;
-        case 'disconnect':           handleDisconnect(tid); break;
+        case 'disconnect':
+          if (window.confirm('Are you sure you want to disconnect this prospect?')) {
+            handleDisconnect(tid);
+          }
+          break;
         case 'connection_request':   handleConnectionRequest(tid); break;
         case 'follow_up':             handleFollowUp(tid); break;
         case 'force_cr':              handleConnectionRequest(tid); break;
