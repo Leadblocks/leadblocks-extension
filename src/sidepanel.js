@@ -2469,15 +2469,10 @@ function attachListeners() {
         return m;
       });
 
-      await apiPost('/api/data-receivers', {
-        data: {
-          data_type: 'robot_linkedin_chat',
-          raw_data: {
-            messages: resolvedMessages,
-            profile_id: cs.profile_id,
-            customer_id: cs.customer_id,
-          },
-        },
+      await apiPost('/api/extension/robot-linkedin-chat', {
+        messages: resolvedMessages,
+        profile_id: cs.profile_id,
+        customer_id: cs.customer_id,
       });
 
       state.chatScraper.status = 'ready';
