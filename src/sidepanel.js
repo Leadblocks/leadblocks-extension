@@ -1041,7 +1041,13 @@ function buildConnectionAcceptanceArea() {
 // --- Connection Request list ---
 
 function buildConnectionRequestList() {
-  const rows = state.tasks.map(task => {
+  // If the user is currently on a LinkedIn profile that matches one of the pending tasks,
+  // only show that task — hide all others to prevent accidentally copying/sending the wrong message.
+  const activeTask = state.tasks.find(t => !state.actionedTasks[t.id] && t.profile_url && urlMatches(t.profile_url, state.currentTabUrl));
+  const visibleTasks = activeTask ? state.tasks.filter(t => state.actionedTasks[t.id] || t.id === activeTask.id) : state.tasks;
+  const hiddenCount = state.tasks.length - visibleTasks.length;
+
+  const rows = visibleTasks.map(task => {
     const isActioned = !!state.actionedTasks[task.id];
     const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
     const campaignHtml = buildCampaignPill(task);
@@ -1095,8 +1101,17 @@ function buildConnectionRequestList() {
     `;
   }).join('');
 
+  const hiddenBanner = hiddenCount > 0
+    ? `<div class="cr-hidden-banner">${hiddenCount} other task${hiddenCount !== 1 ? 's' : ''} hidden — navigate away from this profile to see all tasks</div>`
+    : '';
+  const checkBanner = activeTask
+    ? `<div class="cr-check-banner">⚠ Double-check the message below before sending — make sure you're sending the right content to this prospect.</div>`
+    : '';
+
   return `
     <div class="revoke-summary">${state.tasks.length} Connection Request task${state.tasks.length !== 1 ? 's' : ''} due</div>
+    ${hiddenBanner}
+    ${checkBanner}
     <div class="revoke-list">${rows}</div>
   `;
 }

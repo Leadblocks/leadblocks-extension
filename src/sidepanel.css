@@ -282,6 +282,28 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
 .btn-send  { background: #2563eb; color: white; border-color: #2563eb; }
 .btn-send:not(:disabled):hover  { background: #1d4ed8; }
 
+/* Banner shown when other tasks are hidden because user is on a matching profile */
+.cr-hidden-banner {
+  font-size: 11px;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+
+/* Reminder banner to double-check the message content */
+.cr-check-banner {
+  font-size: 11px;
+  color: #1e40af;
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+
 /* Active CR row — user is currently on this profile */
 .cr-row-active {
   border-left: 3px solid #2563eb;
