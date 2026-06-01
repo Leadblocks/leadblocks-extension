@@ -129,7 +129,7 @@ const state = {
   contactDetails: {},     // taskId -> {email, phone, birthday, date_connected}
 
   // Chatter Tasks (step 6) per-task state
-  chatterAction: {},      // taskDocId -> 'send_message' | 'forward_client' | 'back_campaign' | 'disconnect'
+  chatterAction: {},      // taskDocId -> 'send_message' | 'forward_client' | 'back_campaign' | 'disconnect' | 'other_dmu'
   chatterSent: {},        // taskDocId -> 'message' | 'forwarded' | 'back_campaign'
   chatterDisconnected: {},// taskDocId -> true
   disconnectPending: {},  // unused — kept for compatibility
@@ -137,6 +137,7 @@ const state = {
   chatterTaskTags: {},    // taskDocId -> array of {id, tag_name, colour, is_standard}
   chatterTagSelectorOpen: {}, // taskDocId -> bool (is the tag dropdown open)
   availableTagsByProfile: {}, // numericProfileId -> array of tags (cached for chatter tasks tab)
+  otherDmuCampaignsByProfile: {}, // numericProfileId -> array of {id, campaign_name} (Other DMU campaigns)
   campaignContentPopup: null, // null | { title, content: [...] , loading: bool, error: string }
   notesPopup: null,           // null | { title, notes: [...] }
   chatPopup: null,            // null | { title, messages, prospectId, loading, error }
@@ -405,6 +406,8 @@ async function loadAllTasks() {
       restoreChatterStateForTasks(all);
       // Fire-and-forget: load all available tags for the tag picker
       loadAvailableTags();
+      // Fire-and-forget: load Other DMU campaigns per profile
+      loadOtherDmuCampaigns(all);
     } else {
       // Default: paginated fetch from all-robot-tasks
       let page = 1;
@@ -1204,11 +1207,15 @@ function buildChatterTasksList() {
     const sentKind = state.chatterSent[tid];
     const isDisconnected = !!state.chatterDisconnected[tid];
     const followUpChecked = !!state.chatterFollowUp[tid];
+    const profileNumericId = task.campaign_prospect?.campaign?.profile?.id;
+    const otherDmuCampaigns = profileNumericId
+      ? (state.otherDmuCampaignsByProfile[String(profileNumericId)] || [])
+      : [];
+    const hasOtherDmuCampaigns = otherDmuCampaigns.length > 0;
 
     const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
     const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
     const campaignName = task.campaign_prospect?.campaign?.campaign_name || '';
-    const profileNumericId = task.campaign_prospect?.campaign?.profile?.id;
     const currentTags = state.chatterTaskTags[tid] || [];
     const allForProfile = profileNumericId
       ? (state.availableTagsByProfile[String(profileNumericId)] || [])
@@ -1307,6 +1314,15 @@ function buildChatterTasksList() {
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>
               Back to campaign
             </button>
+            ${hasOtherDmuCampaigns ? `
+            <button class="ct-action-tab ${action === 'other_dmu' ? 'active' : ''}" data-ct-set-action="other_dmu" data-ct-tid="${esc(tid)}">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+              Other DMU
+            </button>` : `
+            <button class="ct-action-tab" disabled title="No Other DMU campaign available for this profile. Contact the operations team." style="opacity:0.45;cursor:not-allowed;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+              Other DMU
+            </button>`}
             <button class="ct-action-tab danger ${action === 'disconnect' ? 'active' : ''}" data-ct-set-action="disconnect" data-ct-tid="${esc(tid)}">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
               Disconnect
@@ -1356,6 +1372,44 @@ function buildChatterTasksList() {
             <p class="ct-hint">⚠ Use when the LinkedIn URL is no longer valid or the prospect has disconnected. This removes them from the campaign.</p>
             <button class="btn btn-danger btn-xs" data-ct-action="disconnect" data-ct-tid="${esc(tid)}" ${isDisconnected ? 'disabled' : ''}>
               ${isDisconnected ? '✓ Disconnected' : 'Confirm disconnect'}
+            </button>
+          </div>` : ''}
+
+          ${action === 'other_dmu' ? `
+          <div class="ct-form">
+            <p class="ct-hint">Referred by: <strong>${esc([task.first_name, task.last_name].filter(Boolean).join(' '))}</strong></p>
+            <label class="ct-label">Campaign</label>
+            <select class="ct-input" id="ct-dmu-campaign-${esc(tid)}">
+              ${otherDmuCampaigns.map(c => `<option value="${esc(String(c.id))}">${esc(c.campaign_name)}</option>`).join('')}
+            </select>
+            <label class="ct-label">LinkedIn URL</label>
+            <input type="url" class="ct-input" id="ct-dmu-url-${esc(tid)}" placeholder="https://www.linkedin.com/in/slug/" />
+            <div class="ct-form-row">
+              <div class="ct-form-col">
+                <label class="ct-label">First name</label>
+                <input type="text" class="ct-input" id="ct-dmu-fname-${esc(tid)}" placeholder="First name" />
+              </div>
+              <div class="ct-form-col">
+                <label class="ct-label">Last name</label>
+                <input type="text" class="ct-input" id="ct-dmu-lname-${esc(tid)}" placeholder="Last name" />
+              </div>
+            </div>
+            <label class="ct-label">Status</label>
+            <div class="ct-seg-toggle" id="ct-dmu-toggle-${esc(tid)}">
+              <button type="button" class="ct-seg-btn ct-seg-red ct-seg-active" data-ct-action="dmu_toggle" data-ct-tid="${esc(tid)}" data-ct-val="not_connected">
+                Not Connected
+              </button>
+              <button type="button" class="ct-seg-btn ct-seg-green" data-ct-action="dmu_toggle" data-ct-tid="${esc(tid)}" data-ct-val="connected">
+                Connected
+              </button>
+            </div>
+            <input type="hidden" id="ct-dmu-conn-${esc(tid)}" value="not_connected" />
+            <div id="ct-dmu-date-row-${esc(tid)}" style="display:none;margin-bottom:4px">
+              <label class="ct-label">Date connected</label>
+              <input type="date" class="ct-input" id="ct-dmu-date-${esc(tid)}" />
+            </div>
+            <button class="btn btn-primary btn-xs" data-ct-action="other_dmu" data-ct-tid="${esc(tid)}" ${sentKind === 'other_dmu' ? 'disabled' : ''}>
+              ${sentKind === 'other_dmu' ? '✓ Other DMU created' : 'Create Other DMU'}
             </button>
           </div>` : ''}
         </div>
@@ -1421,6 +1475,36 @@ async function loadAvailableTags() {
     if (STEPS[state.currentStep]?.key === 'chatter_tasks') render();
   } catch (err) {
     console.warn('[Tags] Failed to load available tags:', err?.message);
+  }
+}
+
+async function loadOtherDmuCampaigns(tasks) {
+  // Collect unique numeric profile IDs from the task list
+  const profileIds = [...new Set(
+    tasks
+      .map(t => t.campaign_prospect?.campaign?.profile?.id)
+      .filter(Boolean)
+  )];
+  if (profileIds.length === 0) return;
+
+  try {
+    const byProfile = { ...state.otherDmuCampaignsByProfile };
+    await Promise.all(profileIds.map(async (profileId) => {
+      const url =
+        `/api/campaigns?filters[profile][id][$eq]=${profileId}` +
+        `&filters[campaign_type][$eq]=Other DMU` +
+        `&fields[0]=id&fields[1]=campaign_name` +
+        `&pagination[pageSize]=50`;
+      const result = await apiGet(url);
+      byProfile[String(profileId)] = (result?.data || []).map(c => ({
+        id: c.id,
+        campaign_name: c.campaign_name ?? c.attributes?.campaign_name,
+      }));
+    }));
+    state.otherDmuCampaignsByProfile = byProfile;
+    if (STEPS[state.currentStep]?.key === 'chatter_tasks') render();
+  } catch (err) {
+    console.warn('[OtherDMU] Failed to load Other DMU campaigns:', err?.message);
   }
 }
 
@@ -1529,6 +1613,73 @@ async function handleChatterDisconnect(tid) {
     render();
   } catch (err) {
     showToast(`Failed to disconnect: ${err.message}`, 'error');
+  }
+}
+
+function ctDmuToggle(tid, val) {
+  const hidden = document.getElementById(`ct-dmu-conn-${tid}`);
+  if (hidden) hidden.value = val;
+  const toggle = document.getElementById(`ct-dmu-toggle-${tid}`);
+  if (!toggle) return;
+  toggle.querySelectorAll('.ct-seg-btn').forEach(btn => {
+    const isActive = btn.dataset.ctVal === val;
+    btn.classList.toggle('ct-seg-active', isActive);
+  });
+  const dateRow = document.getElementById(`ct-dmu-date-row-${tid}`);
+  if (dateRow) dateRow.style.display = val === 'connected' ? '' : 'none';
+}
+
+async function handleChatterOtherDmu(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  const otherDmuCampaignId = parseInt(el(`ct-dmu-campaign-${tid}`)?.value || '0', 10);
+  const dmuLinkedInUrl = el(`ct-dmu-url-${tid}`)?.value?.trim() || '';
+  const dmuFirstName   = el(`ct-dmu-fname-${tid}`)?.value?.trim() || '';
+  const dmuLastName    = el(`ct-dmu-lname-${tid}`)?.value?.trim() || '';
+  const isConnected    = document.getElementById(`ct-dmu-conn-${tid}`)?.value === 'connected';
+  const dateConnected  = isConnected ? (el(`ct-dmu-date-${tid}`)?.value?.trim() || '') : '';
+
+  if (!otherDmuCampaignId) {
+    showToast('Please select an Other DMU campaign.', 'error');
+    return;
+  }
+  if (!dmuLinkedInUrl) {
+    showToast('Please enter a LinkedIn URL.', 'error');
+    return;
+  }
+  const linkedInUrlPattern = /^https:\/\/(www\.)?linkedin\.com\/in\/[a-zA-Z0-9\-_%]+\/?$/;
+  if (!linkedInUrlPattern.test(dmuLinkedInUrl)) {
+    showToast('LinkedIn URL must be in the format: https://www.linkedin.com/in/slug/', 'error');
+    return;
+  }
+  if (!dmuFirstName || !dmuLastName) {
+    showToast('Please fill in first name and last name.', 'error');
+    return;
+  }
+  if (isConnected && !dateConnected) {
+    showToast('Please fill in the date connected.', 'error');
+    return;
+  }
+
+  try {
+    await apiPost('/api/data-senders/other_dmu_referral', {
+      source_campaign_prospect_id: task.campaign_prospect?.id,
+      source_task_document_id: tid,
+      other_dmu_campaign_id: otherDmuCampaignId,
+      dmu_linkedin_url: dmuLinkedInUrl,
+      dmu_first_name: dmuFirstName,
+      dmu_last_name: dmuLastName,
+      is_connected: isConnected,
+      date_connected: dateConnected || null,
+      profile_id: task.profile_id,
+      prospect_id: task.prospect_id,
+    });
+    state.chatterSent[tid] = 'other_dmu';
+    saveActionedState();
+    showToast('Other DMU toegevoegd!');
+    render();
+  } catch (err) {
+    showToast(`Mislukt: ${err.message}`, 'error');
   }
 }
 
@@ -2124,6 +2275,8 @@ function setupGlobalDelegation() {
         case 'forward_client': handleChatterForwardClient(tid); break;
         case 'back_campaign':  handleChatterBackCampaign(tid); break;
         case 'disconnect':     handleChatterDisconnect(tid); break;
+        case 'other_dmu':      handleChatterOtherDmu(tid); break;
+        case 'dmu_toggle':     ctDmuToggle(tid, ctBtn.dataset.ctVal); break;
       }
       return;
     }

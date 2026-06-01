@@ -1154,6 +1154,62 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   margin: 0;
 }
 
+/* Other DMU form layout */
+.ct-form-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ct-form-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ct-form-col .ct-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Other DMU segmented toggle */
+.ct-seg-toggle {
+  display: flex;
+  width: 100%;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  margin: 4px 0 8px;
+}
+
+.ct-seg-btn {
+  flex: 1;
+  padding: 7px 0;
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  background: var(--muted-bg);
+  color: var(--muted);
+  transition: background 0.15s, color 0.15s;
+  letter-spacing: 0.01em;
+}
+
+.ct-seg-btn + .ct-seg-btn {
+  border-left: 1px solid var(--border);
+}
+
+.ct-seg-red.ct-seg-active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.ct-seg-green.ct-seg-active {
+  background: var(--success);
+  color: #fff;
+}
+
 .ct-view-campaign-btn {
   display: inline-flex;
   align-items: center;
