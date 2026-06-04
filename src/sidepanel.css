@@ -913,6 +913,64 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   padding: 4px 0;
 }
 
+.revoke-help {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0 12px 8px;
+}
+
+.revoke-help details {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.revoke-help summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 12px;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--muted-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.revoke-help summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 0.2s ease;
+}
+
+.revoke-help details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.revoke-help summary:hover {
+  background: var(--border);
+}
+
+.revoke-help summary::-webkit-details-marker {
+  display: none;
+}
+
+.revoke-help ol {
+  margin: 0;
+  padding: 0 18px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.revoke-help ol li {
+  margin: 6px 0;
+}
+
 .revoke-row {
   display: flex;
   flex-direction: column;

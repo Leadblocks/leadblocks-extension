@@ -1991,7 +1991,19 @@ function buildRevokeList() {
   }).join('');
 
   return `
-    <div class="revoke-summary">${state.tasks.length} task${state.tasks.length !== 1 ? 's' : ''} due — go to <a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/" target="_blank" class="hint-link">https://www.linkedin.com/mynetwork/invitation-manager/sent/</a></div>
+    <div class="revoke-summary">
+      ${state.tasks.length} task${state.tasks.length !== 1 ? 's' : ''} due — go to <a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/" target="_blank" class="hint-link">https://www.linkedin.com/mynetwork/invitation-manager/sent/</a>
+    </div>
+    <div class="revoke-help">
+      <details class="revoke-instructions">
+        <summary>Is the prospect connected?</summary>
+        <ol>
+          <li>Open the <a href="https://www.linkedin.com/mynetwork/invite-connect/connections/" target="_blank">LinkedIn Connections page</a>.</li>
+          <li>Search the name shown in this revoke task.</li>
+          <li>Switch to Step 1 (Connection Acceptance) and connect the person there.</li>
+        </ol>
+      </details>
+    </div>
     <div class="revoke-list">${rows}</div>
   `;
 }
