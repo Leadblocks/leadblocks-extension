@@ -1122,6 +1122,17 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   color: #1e293b;
 }
 
+.ct-reply-textarea-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ct-reply-textarea-wrap .cr-copy-btn {
+  position: static;
+  align-self: flex-end;
+}
+
 .cr-copy-btn.copied {
   background: #bbf7d0;
   color: #166534;
@@ -1184,6 +1195,11 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
 .ct-input:focus {
   outline: none;
   border-color: var(--primary);
+}
+
+.ct-reply-textarea {
+  min-height: 120px;
+  resize: vertical;
 }
 
 .ct-label {

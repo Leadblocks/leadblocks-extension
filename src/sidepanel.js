@@ -141,6 +141,7 @@ const state = {
   campaignContentPopup: null, // null | { title, content: [...] , loading: bool, error: string }
   notesPopup: null,           // null | { title, notes: [...] }
   chatPopup: null,            // null | { title, messages, prospectId, loading, error }
+  replyTemplatesPopup: null,  // null | { title, options: [], selectedIndex: number, message: string, loading: bool, error: string }
 
   // Connection acceptance (step 1) state
   acceptanceResult: null,  // null | { status, task?, message? }
@@ -663,7 +664,7 @@ async function handleFirstConnectionConnect() {
 function render() {
   const app = document.getElementById('app');
   if (!app) return;
-  app.innerHTML = (state.view === 'login' ? buildLogin() : buildMain()) + buildCampaignContentPopup() + buildNotesPopup() + buildChatPopup();
+  app.innerHTML = (state.view === 'login' ? buildLogin() : buildMain()) + buildCampaignContentPopup() + buildNotesPopup() + buildReplyTemplatesPopup() + buildChatPopup();
   attachListeners();
 }
 
@@ -1269,6 +1270,12 @@ function buildChatterTasksList() {
          </button>`
       : '';
 
+    const replyTemplatesBtn = (task.campaign_prospect?.campaign?.profile?.id && task.profile_id && task.prospect_id)
+      ? `<button class="ct-icon-btn ct-reply-btn" data-ct-view-reply-templates="${esc(tid)}" title="View reply templates">
+           <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h12v16H4z"></path><path d="M8 8h6M8 12h6M8 16h4"></path></svg>
+         </button>`
+      : '';
+
     return `
       <div class="ct-card" data-tid="${esc(tid)}">
         <div class="ct-line1">
@@ -1285,7 +1292,7 @@ function buildChatterTasksList() {
           </svg>
           ${esc(name)}
         </button>` : ''}
-        ${campaignHtml || hasNotes || chatBtn ? `<div class="ct-line2">${campaignHtml}${notesBtn}${chatBtn}</div>` : ''}
+        ${campaignHtml || hasNotes || chatBtn || replyTemplatesBtn ? `<div class="ct-line2">${campaignHtml}${notesBtn}${chatBtn}${replyTemplatesBtn}</div>` : ''}
         ${task.content ? `
         <div class="cr-content-wrap">
           <button class="cr-copy-btn" data-copy="${esc(task.content)}" title="Copy message">
@@ -1681,6 +1688,106 @@ async function handleChatterOtherDmu(tid) {
   } catch (err) {
     showToast(`Mislukt: ${err.message}`, 'error');
   }
+}
+
+function replaceTemplatePlaceholders(template, placeholders) {
+  if (!template) return '';
+  return template
+    .replace(/\{first_name\}/gi, placeholders.first_name || '')
+    .replace(/\{last_name\}/gi, placeholders.last_name || '')
+    .replace(/\{name\}/gi, placeholders.full_name || '')
+    .replace(/\{full_name\}/gi, placeholders.full_name || '')
+    .replace(/\*firstname\*/gi, placeholders.first_name || '')
+    .replace(/\*lastname\*/gi, placeholders.last_name || '');
+}
+
+async function showReplyTemplatesPopup(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  const profileId = task.campaign_prospect?.campaign?.profile?.id || task.profile_id;
+  state.replyTemplatesPopup = {
+    title: `Reply templates for ${[task.first_name, task.last_name].filter(Boolean).join(' ')}`.trim() || 'Reply templates',
+    options: [],
+    selectedIndex: -1,
+    message: '',
+    loading: true,
+    error: null,
+    placeholders: {
+      first_name: task.first_name || '',
+      last_name: task.last_name || '',
+      full_name: [task.first_name, task.last_name].filter(Boolean).join(' '),
+    },
+  };
+  render();
+
+  if (!profileId) {
+    state.replyTemplatesPopup = {
+      ...state.replyTemplatesPopup,
+      loading: false,
+      error: 'No profile available to load reply templates.',
+    };
+    render();
+    return;
+  }
+
+  try {
+    const data = await apiGet(`/api/extension/reply-templates?profileId=${encodeURIComponent(profileId)}`);
+    const replyTemplates = data?.data || null;
+    const options = Array.isArray(replyTemplates?.rows) ? replyTemplates.rows : [];
+    const selectedIndex = options.length > 0 ? 0 : -1;
+    const message = selectedIndex >= 0
+      ? replaceTemplatePlaceholders(options[selectedIndex][1] || '', state.replyTemplatesPopup.placeholders)
+      : '';
+    state.replyTemplatesPopup = {
+      ...state.replyTemplatesPopup,
+      options,
+      selectedIndex,
+      message,
+      loading: false,
+      error: options.length === 0 ? 'No reply templates found for this customer.' : null,
+    };
+  } catch (err) {
+    state.replyTemplatesPopup = {
+      ...state.replyTemplatesPopup,
+      loading: false,
+      error: err.message || 'Failed to load reply templates.',
+    };
+  }
+  render();
+}
+
+function buildReplyTemplatesPopup() {
+  const p = state.replyTemplatesPopup;
+  if (!p) return '';
+  const body = p.loading
+    ? `<div class="loading"><div class="spinner"></div><span>Loading…</span></div>`
+    : p.error
+      ? `<div class="error-msg">${esc(p.error)}</div>`
+      : p.options.length === 0
+        ? `<p class="muted" style="text-align:center">No reply templates available for this customer.</p>`
+        : `
+          <label for="ct-reply-template-select" class="ct-label">Select a template</label>
+          <select id="ct-reply-template-select" class="ct-input">
+            ${p.options.map((row, index) => `<option value="${index}" ${p.selectedIndex === index ? 'selected' : ''}>${esc(row[0] || `Option ${index + 1}`)}</option>`).join('')}
+          </select>
+          <label for="ct-reply-textarea" class="ct-label">Reply text</label>
+          <div class="ct-reply-textarea-wrap">
+            <textarea id="ct-reply-textarea" class="ct-input ct-reply-textarea" readonly rows="5">${esc(p.message)}</textarea>
+            <button class="cr-copy-btn" data-copy="${esc(p.message)}" title="Copy reply">Copy reply</button>
+          </div>
+        `;
+
+  return `
+    <div class="ct-cc-overlay" id="ct-reply-overlay">
+      <div class="ct-cc-modal">
+        <div class="ct-cc-header">
+          <h3>${esc(p.title)}</h3>
+          <button class="ct-cc-close" id="ct-reply-close" title="Close">×</button>
+        </div>
+        <div class="ct-cc-body">${body}</div>
+      </div>
+    </div>
+  `;
 }
 
 async function showCampaignContentPopup(campaignName) {
@@ -2362,6 +2469,12 @@ function setupGlobalDelegation() {
     }
 
     // View chat button
+    const viewReplyTemplatesBtn = e.target.closest('[data-ct-view-reply-templates]');
+    if (viewReplyTemplatesBtn) {
+      showReplyTemplatesPopup(viewReplyTemplatesBtn.dataset.ctViewReplyTemplates);
+      return;
+    }
+
     const viewChatBtn = e.target.closest('[data-ct-view-chat]');
     if (viewChatBtn) {
       showChatPopup(viewChatBtn.dataset.ctViewChat);
@@ -2382,6 +2495,13 @@ function setupGlobalDelegation() {
       return;
     }
 
+    // Close reply templates popup
+    if (e.target.id === 'ct-reply-close' || e.target.id === 'ct-reply-overlay') {
+      state.replyTemplatesPopup = null;
+      render();
+      return;
+    }
+
     // Close chat popup
     if (e.target.id === 'ct-chat-close' || e.target.id === 'ct-chat-overlay') {
       state.chatPopup = null;
@@ -2392,6 +2512,17 @@ function setupGlobalDelegation() {
 
   // Chatter task follow-up checkbox toggle
   document.addEventListener('change', e => {
+    const replySelect = e.target.id === 'ct-reply-template-select';
+    if (replySelect && state.replyTemplatesPopup) {
+      const popup = state.replyTemplatesPopup;
+      const selectedIndex = Number(e.target.value);
+      const option = popup.options[selectedIndex];
+      const message = option ? replaceTemplatePlaceholders(option[1] || '', popup.placeholders || {}) : '';
+      state.replyTemplatesPopup = { ...popup, selectedIndex, message };
+      render();
+      return;
+    }
+
     const fu = e.target.closest('.ct-followup-toggle');
     if (fu) {
       const tid = fu.dataset.ctTid;
