@@ -212,10 +212,18 @@ window.addEventListener('popstate', sendUrl);
 
   // Label text (lowercased) → field name
   const LABEL_MAP = {
+    // Email
     'e-mail': 'email', 'email': 'email',
-    'telefoon': 'phone', 'phone': 'phone',
-    'verjaardag': 'birthday', 'birthday': 'birthday',
-    'connectie sinds': 'date_connected', 'connected since': 'date_connected', 'verbonden': 'date_connected', 'connected': 'date_connected',
+    // Phone
+    'telefoon': 'phone', 'phone': 'phone', 'téléphone': 'phone', 'telefon': 'phone',
+    // Birthday
+    'verjaardag': 'birthday', 'birthday': 'birthday', 'geburtstag': 'birthday', 'anniversaire': 'birthday',
+    // Date connected (many LinkedIn locale variants)
+    'connected since': 'date_connected', 'connected': 'date_connected',
+    'connectie sinds': 'date_connected', 'verbonden': 'date_connected', 'verbonden sinds': 'date_connected',
+    'verbunden seit': 'date_connected', 'verbunden': 'date_connected',
+    'connecté depuis': 'date_connected', 'connectée depuis': 'date_connected',
+    'membre depuis': 'date_connected',
   };
 
   /** Parse "day month year" or "month day year" → YYYY-MM-DD */
@@ -406,8 +414,15 @@ window.addEventListener('popstate', sendUrl);
       try {
         chrome.runtime.sendMessage({ type: 'CONTACT_INFO', data: info || {} }).catch(() => {});
       } catch (_) {}
-      // Only lock the URL once we resolved a prospect_id — allows retries if SDUI renders late
-      if (info?.prospect_id) lastScrapedUrl = url;
+      // Don't lock on prospect_id alone — LazyColumn renders contact items (email, birthday, etc.)
+      // after the structural container that holds the componentkey. Lock only once we have contact
+      // data alongside the prospect_id, or after exhausting all retries.
+      if (info?.prospect_id) {
+        const hasContactData = info.email || info.phone || info.birthday || info.date_connected;
+        if (hasContactData || scrapeAttempts >= MAX_SCRAPE_ATTEMPTS) {
+          lastScrapedUrl = url;
+        }
+      }
     }, 300);
   });
 
