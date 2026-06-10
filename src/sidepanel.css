@@ -757,7 +757,10 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.2s, transform 0.2s;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+  max-width: calc(100% - 32px);
+  width: auto;
   z-index: 9999;
   box-shadow: 0 4px 12px rgba(0,0,0,0.15);
 }

@@ -128,10 +128,16 @@ const state = {
   actionedTasks: {},      // taskId -> 'connected' | 'revoked' | 'disconnected'
   contactDetails: {},     // taskId -> {email, phone, birthday, date_connected}
 
+  // Connection acceptance overlay warnings
+  lastOverlayWarningUrl: '',
+
   // Chatter Tasks (step 6) per-task state
   chatterAction: {},      // taskDocId -> 'send_message' | 'forward_client' | 'back_campaign' | 'disconnect' | 'other_dmu'
   chatterSent: {},        // taskDocId -> 'message' | 'forwarded' | 'back_campaign'
   chatterDisconnected: {},// taskDocId -> true
+  chatterAiSuggestion: {}, // taskDocId -> generated AI suggestion text
+  chatterAiLoading: {},    // taskDocId -> bool
+  chatterAiError: {},      // taskDocId -> error message
   disconnectPending: {},  // unused — kept for compatibility
   chatterFollowUp: {},    // taskDocId -> bool (controls follow-up date visibility)
   chatterTaskTags: {},    // taskDocId -> array of {id, tag_name, colour, is_standard}
@@ -156,9 +162,13 @@ const state = {
     thread_url: '',    // URL of the scraped thread
     sentCount: null,   // null | number — set after a successful send
     error: null,
-    scraperDays: 7,    // period filter: 7 | 31 | 0 (0 = all time)
+    scraperDays: 0,    // period filter: 7 | 31 | 0 (0 = all time)
     manualSenderOverrides: {}, // messageId → 'sent' | 'received'
   },
+
+  // Follow-up safeguard state
+  followUpBlocked: {},    // taskId -> epoch ms until follow-up send is blocked
+  followUpChecking: {},   // taskId -> true while we verify the active chat
 
   // UI
   view: 'login',          // 'login' | 'main'
@@ -168,6 +178,10 @@ const state = {
   loadingCustomers: false,
   error: null,
   currentTabUrl: '',
+  currentThreadProspectId: '',
+  currentOverlayProspectId: '',
+  currentOverlayProfileUrl: '',
+  lastBlockedReportKey: '',
 };
 
 // =============================================================================
@@ -189,9 +203,74 @@ function urlMatches(taskUrl, tabUrl) {
   return normalizeUrl(taskUrl) === normalizeUrl(tabUrl);
 }
 
+function normalizeProspectId(id) {
+  if (id == null) return '';
+  return String(id).trim().toLowerCase();
+}
+
+function isMessagingThreadUrl(url) {
+  return /linkedin\.com\/messaging\/(thread|conversations)\//i.test(url);
+}
+
+function getCurrentThreadProspectId() {
+  if (isMessagingThreadUrl(state.currentTabUrl) && state.chatScraper.thread_url === state.currentTabUrl && state.chatScraper.profile_id) {
+    return normalizeProspectId(state.chatScraper.profile_id);
+  }
+  return normalizeProspectId(state.currentThreadProspectId);
+}
+
 function getAvailableProfiles() {
   const customer = state.customers.find(c => String(c.id) === state.pendingCustomerId);
   return customer ? (customer.profiles || []) : [];
+}
+
+function getSelectedConnectionProspectId() {
+  return normalizeProspectId(state.appliedProspectId || state.pendingProspectId || '');
+}
+
+function getSelectedConnectionProspectIdRaw() {
+  return state.appliedProspectId || state.pendingProspectId || '';
+}
+
+function getSelectedConnectionProfileUrl() {
+  return state.appliedProspectUrl || state.pendingProspectUrl || '';
+}
+
+function getAppliedProfileName() {
+  const customer = state.customers.find(c => (c.profiles || []).some(p => String(p.id) === String(state.appliedProfileId)));
+  const profile = customer ? (customer.profiles || []).find(p => String(p.id) === String(state.appliedProfileId)) : null;
+  return profile?.profile_name || '';
+}
+
+function isConnectionAcceptanceOverlayMatch() {
+  const overlayId = normalizeProspectId(state.currentOverlayProspectId);
+  const selectedId = getSelectedConnectionProspectId();
+  const overlayUrl = state.currentOverlayProfileUrl || '';
+  const selectedUrl = getSelectedConnectionProfileUrl();
+  const idMatch = overlayId && selectedId ? overlayId === selectedId : null;
+  const urlMatch = overlayUrl && selectedUrl ? urlMatches(selectedUrl, overlayUrl) : null;
+
+  if (overlayId && selectedId) {
+    return idMatch;
+  }
+
+  if (overlayUrl && selectedUrl) {
+    return urlMatch;
+  }
+
+  return false;
+}
+
+function isConnectionAcceptanceOverlayMismatch() {
+  const selectedId = getSelectedConnectionProspectId();
+  const selectedUrl = getSelectedConnectionProfileUrl();
+  const overlayMatch = isConnectionAcceptanceOverlayMatch();
+
+  const mismatch = !overlayMatch && (selectedId || selectedUrl);
+
+  if (overlayMatch) return false;
+  if (selectedId || selectedUrl) return true;
+  return false;
 }
 
 /** Escape HTML special characters to prevent XSS when inserting into innerHTML */
@@ -213,6 +292,194 @@ function showToast(message, type = 'success') {
   showToast._timer = setTimeout(() => { toast.className = 'toast'; }, 3000);
 }
 
+const followUpBlockTimers = {};
+let followUpBlockInterval = null;
+const FOLLOW_UP_BLOCK_MINUTES = 5;
+
+function isFollowUpBlocked(taskId) {
+  const expiry = state.followUpBlocked[taskId];
+  return expiry && expiry > Date.now();
+}
+
+function isFollowUpChecking(taskId) {
+  return !!state.followUpChecking[taskId];
+}
+
+async function autoCheckActiveFollowUpTask() {
+  const currentThreadProspectId = getCurrentThreadProspectId();
+  if (!currentThreadProspectId || state.tasks.length === 0) return;
+
+  const activeTask = state.tasks.find(t => {
+    if (state.actionedTasks[t.id]) return false;
+    return t.prospect_id && normalizeProspectId(t.prospect_id) === currentThreadProspectId;
+  });
+  if (!activeTask) return;
+  if (isFollowUpBlocked(activeTask.id) || isFollowUpChecking(activeTask.id)) return;
+
+  state.followUpChecking[activeTask.id] = true;
+  render();
+
+  try {
+    await ensureFollowUpChatUpToDate(activeTask.id);
+  } catch (err) {
+    console.error('Auto follow-up chat check failed:', err);
+  } finally {
+    delete state.followUpChecking[activeTask.id];
+    render();
+  }
+}
+
+function getFollowUpTimeRemaining(taskId) {
+  const expiry = state.followUpBlocked[taskId];
+  if (!expiry) return 0;
+  return Math.max(0, expiry - Date.now());
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.ceil(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  }
+  return `${seconds}s`;
+}
+
+function getFollowUpBlockTitle(taskId) {
+  const remaining = getFollowUpTimeRemaining(taskId);
+  const remainingText = remaining ? `Time remaining: ${formatDurationMs(remaining)}.` : '';
+  return `Action blocked for ${FOLLOW_UP_BLOCK_MINUTES} minutes, move on to another task or step 5 and come back later. ${remainingText}`;
+}
+
+function startFollowUpCountdown() {
+  if (followUpBlockInterval) return;
+  followUpBlockInterval = setInterval(() => {
+    const anyBlocked = Object.keys(state.followUpBlocked).some(isFollowUpBlocked);
+    if (!anyBlocked) {
+      clearInterval(followUpBlockInterval);
+      followUpBlockInterval = null;
+      return;
+    }
+    render();
+  }, 1000);
+}
+
+function blockFollowUpTask(taskId, minutes = FOLLOW_UP_BLOCK_MINUTES) {
+  const expiry = Date.now() + minutes * 60 * 1000;
+  state.followUpBlocked[taskId] = expiry;
+  if (followUpBlockTimers[taskId]) {
+    clearTimeout(followUpBlockTimers[taskId]);
+  }
+  followUpBlockTimers[taskId] = setTimeout(() => {
+    if (state.followUpBlocked[taskId] === expiry) {
+      delete state.followUpBlocked[taskId];
+      delete followUpBlockTimers[taskId];
+      render();
+    }
+  }, minutes * 60 * 1000);
+  startFollowUpCountdown();
+}
+
+function scrapeChatFromActiveTab(cutoffMs = 0) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      const tab = tabs[0];
+      if (!tab || !tab.id) {
+        return reject(new Error('No active tab found.'));
+      }
+      chrome.tabs.sendMessage(tab.id, { type: 'SCRAPE_CHAT', cutoffMs }, response => {
+        if (chrome.runtime.lastError) {
+          return reject(new Error(chrome.runtime.lastError.message || 'Could not reach the LinkedIn page.'));
+        }
+        if (!response) {
+          return reject(new Error('No response from the LinkedIn page.'));
+        }
+        if (response.error) {
+          return reject(new Error(response.error));
+        }
+        resolve(response.data);
+      });
+    });
+  });
+}
+
+function extractProspectIdFromActiveThread() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      const tab = tabs[0];
+      if (!tab || !tab.id) {
+        return reject(new Error('No active tab found.'));
+      }
+      chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_THREAD_CONTACT_ID' }, response => {
+        if (chrome.runtime.lastError) {
+          return reject(new Error(chrome.runtime.lastError.message || 'Could not reach the LinkedIn page.'));
+        }
+        if (!response || !response.data) {
+          return reject(new Error('No response from the LinkedIn page.'));
+        }
+        resolve(response.data);
+      });
+    });
+  });
+}
+
+async function refreshCurrentThreadProspectId() {
+  if (!isMessagingThreadUrl(state.currentTabUrl)) {
+    state.currentThreadProspectId = '';
+    return;
+  }
+  try {
+    const data = await extractProspectIdFromActiveThread();
+    state.currentThreadProspectId = normalizeProspectId(data.profile_id || '');
+  } catch (_) {
+    state.currentThreadProspectId = '';
+  }
+}
+
+async function ensureFollowUpChatUpToDate(taskId) {
+  const task = state.tasks.find(t => String(t.id) === String(taskId));
+  if (!task) return { upToDate: true };
+
+  const isMessagingThread = /linkedin\.com\/messaging\/(thread|conversations)\//i.test(state.currentTabUrl);
+  if (!isMessagingThread) {
+    return { upToDate: true };
+  }
+
+  const customer = state.customers.find(c => (c.profiles || []).some(p => String(p.id) === String(state.appliedProfileId)));
+  const profile = customer ? (customer.profiles || []).find(p => String(p.id) === String(state.appliedProfileId)) : null;
+  const customerId = profile?.profile_id || '';
+  if (!customerId) {
+    throw new Error('Could not determine the selected LinkedIn profile for chat verification. Reload follow-up tasks and try again.');
+  }
+
+  const chat = await scrapeChatFromActiveTab(0);
+  const unknownSenderCount = chat.messages.filter(m => m.sender_id === null).length;
+  if (unknownSenderCount > 0) {
+    throw new Error('Unable to verify chat because some messages have unknown sender direction. Open the thread in Messaging step, fix the unknown messages, then try again.');
+  }
+
+  const messageIds = chat.messages.map(m => m.message_id).filter(Boolean);
+  if (messageIds.length === 0) {
+    throw new Error('No chat messages were found in the active thread. Scroll up to load messages and try again.');
+  }
+
+  const checkRes = await apiPost('/api/messages/check-existing', { message_ids: messageIds });
+  const existingSet = new Set(checkRes.existing || []);
+  const newMessages = chat.messages.filter(m => !existingSet.has(m.message_id));
+  if (newMessages.length === 0) {
+    return { upToDate: true };
+  }
+
+  await apiPost('/api/extension/robot-linkedin-chat', {
+    messages: newMessages,
+    profile_id: chat.profile_id,
+    customer_id: customerId,
+  });
+
+  blockFollowUpTask(taskId, 2);
+  return { upToDate: false, newMessageCount: newMessages.length };
+}
+
 // =============================================================================
 // API
 // =============================================================================
@@ -222,7 +489,6 @@ async function apiGet(path) {
     throw new Error(`Invalid backend URL: ${state.backendUrl}. Please log in again.`);
   }
   const fullUrl = `${state.backendUrl}${path}`;
-  console.log('[API] GET request to:', fullUrl);
   const res = await fetch(fullUrl, {
     headers: { Authorization: `Bearer ${state.token}` },
   });
@@ -239,7 +505,6 @@ async function apiPost(path, body) {
     throw new Error(`Invalid backend URL: ${state.backendUrl}. Please log in again.`);
   }
   const fullUrl = `${state.backendUrl}${path}`;
-  console.log('[API] POST request to:', fullUrl, 'with body:', body);
   const res = await fetch(fullUrl, {
     method: 'POST',
     headers: {
@@ -256,6 +521,17 @@ async function apiPost(path, body) {
   return res.json();
 }
 
+async function reportBlockedUserMistake(report) {
+  try {
+    const reportKey = `${report.action}|${report.reason}|${report.selectedProspectId || ''}|${report.selectedProspectUrl || ''}|${report.overlayProspectId || ''}|${report.overlayProfileUrl || ''}`;
+    if (state.lastBlockedReportKey === reportKey) return;
+    state.lastBlockedReportKey = reportKey;
+    await apiPost('/api/extension/report-user-mistake', report);
+  } catch (_) {
+    // Ignore reporting failures; do not interrupt user flow.
+  }
+}
+
 // =============================================================================
 // CHROME STORAGE
 // =============================================================================
@@ -263,7 +539,6 @@ async function apiPost(path, body) {
 function loadStoredAuth() {
   return new Promise(resolve => {
     chrome.storage.local.get(['token', 'backendUrl', 'userName', 'userType'], data => {
-      console.log('[Auth] Loaded from storage:', { token: !!data.token, backendUrl: data.backendUrl });
       if (data.token) state.token = data.token;
       if (data.userName) state.userName = data.userName;
       if (data.userType) state.userType = data.userType;
@@ -271,7 +546,6 @@ function loadStoredAuth() {
       if (data.backendUrl && typeof data.backendUrl === 'string' && data.backendUrl.trim()) {
         state.backendUrl = data.backendUrl.trim();
       }
-      console.log('[Auth] State after loading:', { backendUrl: state.backendUrl, token: !!state.token });
       resolve();
     });
   });
@@ -333,6 +607,7 @@ async function loadCampaigns(profileId) {
     }));
   } catch (err) {
     console.error('Failed to load campaigns:', err);
+    showToast('Failed to load campaigns: ' + err.message, 'error');
     state.campaigns = [];
   } finally {
     state.loadingCampaigns = false;
@@ -485,6 +760,11 @@ async function lookupConnection() {
 // =============================================================================
 
 async function handleConnect(taskId) {
+  if (isConnectionAcceptanceOverlayMismatch()) {
+    showToast('Current contact info overlay does not match the selected prospect.', 'error');
+    return;
+  }
+
   const task = state.tasks.find(t => String(t.id) === String(taskId));
   if (!task) return;
   if (state.actionedTasks[taskId]) return; // guard double-click
@@ -507,6 +787,9 @@ async function handleConnect(taskId) {
       date_connected: contact.date_connected || '',
     });
     state.actionedTasks[taskId] = 'connected';
+    state.pendingProspectId = '';
+    state.pendingProspectName = '';
+    state.pendingProspectUrl = '';
     saveActionedState();
     showToast('Connection confirmation sent!', 'success');
     if (state.viewMode === 'queue') {
@@ -544,9 +827,35 @@ async function handleFollowUp(taskId) {
   const task = state.tasks.find(t => String(t.id) === String(taskId));
   if (!task) return;
   if (state.actionedTasks[taskId]) return; // guard double-click
+  if (isFollowUpBlocked(taskId)) {
+    showToast('Follow-up is temporarily blocked while we update the chat in the backend.', 'error');
+    return;
+  }
+
   state.actionedTasks[taskId] = 'sending'; // optimistic lock
+  state.followUpChecking[taskId] = true;
   render();
   try {
+    const chatCheck = await ensureFollowUpChatUpToDate(taskId);
+    if (!chatCheck.upToDate) {
+      await reportBlockedUserMistake({
+        action: 'follow_up',
+        reason: 'chat_not_up_to_date',
+        note: 'System blocked follow-up because the chat had new unread updates before sending.',
+        profileId: state.appliedProfileId || null,
+        profileName: task.campaign_prospect?.campaign?.profile?.profile_name || getAppliedProfileName() || null,
+        taskId: taskId || null,
+        taskProfileUrl: task.profile_url || null,
+        taskProspectId: task.prospect_id || null,
+        currentTabUrl: state.currentTabUrl || null,
+        newMessageCount: chatCheck.newMessageCount || 0,
+      });
+      delete state.actionedTasks[taskId];
+      render();
+      showToast(`New chat updates were sent to the backend. This follow-up is blocked for ${FOLLOW_UP_BLOCK_MINUTES} minutes while the task syncs.`, 'error');
+      return;
+    }
+
     await apiPost('/api/extension/follow-up', task);
     state.actionedTasks[taskId] = 'sent';
     saveActionedState();
@@ -556,6 +865,8 @@ async function handleFollowUp(taskId) {
     delete state.actionedTasks[taskId];
     showToast('Error: ' + err.message, 'error');
     render();
+  } finally {
+    delete state.followUpChecking[taskId];
   }
 }
 
@@ -623,6 +934,11 @@ function advanceQueue() {
 }
 
 async function handleFirstConnectionConnect() {
+  if (isConnectionAcceptanceOverlayMismatch()) {
+    showToast('Current contact info overlay does not match the selected prospect.', 'error');
+    return;
+  }
+
   const contact = state.contactDetails['fc'] || {};
 
   if (!contact.date_connected || contact.date_connected.trim() === '') {
@@ -637,7 +953,6 @@ async function handleFirstConnectionConnect() {
     // Pass the profile URL so the backend can derive a synthetic prospect_id
     // and store the linkedin_url on the prospect record when no real URN is available.
     const profileUrl = state.acceptanceResult?.profileUrl || state.appliedProspectUrl || '';
-    console.log('[FirstConnection] Connecting with prospectId:', prospectId, '| profileUrl:', profileUrl);
 
     await apiPost('/api/extension/connection-acceptance/first-connection', {
       profileId: state.appliedProfileId,
@@ -649,6 +964,9 @@ async function handleFirstConnectionConnect() {
       date_connected: contact.date_connected || '',
     });
     state.actionedTasks['fc'] = 'connected';
+    state.pendingProspectId = '';
+    state.pendingProspectName = '';
+    state.pendingProspectUrl = '';
     showToast('First connection registered!', 'success');
     state.acceptanceResult = { status: 'done' };
     render();
@@ -756,7 +1074,7 @@ function buildFilters() {
     state.pendingProspectUrl !== state.appliedProspectUrl ||
     state.pendingLinkedInSearch !== state.appliedLinkedInSearch;
 
-  // For connection acceptance, require a prospect ID or URL; for other steps, require a profile
+  // For connection acceptance, require a prospect ID or URL; for other steps, require a profile.
   const canApply = isAcceptance
     ? state.pendingProfileId && (state.pendingProspectId.trim() !== '' || state.pendingProspectUrl.trim() !== '')
     : state.pendingProfileId && filtersChanged;
@@ -939,6 +1257,7 @@ function buildConnectionAcceptanceArea() {
     const contact = state.contactDetails[task.id] || { email: '', phone: '', birthday: '', date_connected: '' };
     const campaignHtml = buildCampaignPill(task);
     const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
+    const overlayMismatch = isConnectionAcceptanceOverlayMismatch();
 
     return `
       <div class="task-card" style="margin:12px 0">
@@ -969,9 +1288,8 @@ function buildConnectionAcceptanceArea() {
             </div>
           </div>
         </div>
-
         <div class="task-actions">
-          <button class="btn btn-primary btn-sm" data-action="connect" data-tid="${task.id}">Connect</button>
+          <button class="btn btn-primary btn-sm" data-action="connect" data-tid="${task.id}"${overlayMismatch ? ' disabled title="Current contact info does not match selected prospect, navigate to the correct prospect please" data-tooltip="Current contact info does not match selected prospect, navigate to the correct prospect please"' : ''}>Connect</button>
           <button class="btn btn-revoke btn-sm" data-action="revoke" data-tid="${task.id}">Revoke</button>
           ${buildDisconnectBtn(task.id, 'btn-sm')}
         </div>
@@ -1001,6 +1319,7 @@ function buildConnectionAcceptanceArea() {
     const prospectLabel = prospect
       ? `Known prospect${prospect.first_name || prospect.last_name ? `: ${esc(prospect.first_name)} ${esc(prospect.last_name)}`.trim() : ''}`
       : 'New prospect';
+    const overlayMismatch = isConnectionAcceptanceOverlayMismatch();
 
     return `
       <div class="task-card" style="margin:12px 0">
@@ -1030,9 +1349,8 @@ function buildConnectionAcceptanceArea() {
             </div>
           </div>
         </div>
-
         <div class="task-actions">
-          <button class="btn btn-primary btn-sm" id="btn-fc-connect">Connect</button>
+          <button class="btn btn-primary btn-sm" id="btn-fc-connect"${overlayMismatch ? ' disabled title="Current contact info does not match selected prospect, navigate to the correct prospect please" data-tooltip="Current contact info does not match selected prospect, navigate to the correct prospect please"' : ''}>Connect</button>
         </div>
       </div>
     `;
@@ -1130,14 +1448,50 @@ function getFollowUpLabel(dataType) {
 }
 
 function buildFollowUpList() {
-  const rows = state.tasks.map(task => {
+  const currentThreadProspectId = getCurrentThreadProspectId();
+  const activeTask = state.tasks.find(t => {
+    if (state.actionedTasks[t.id]) return false;
+    return currentThreadProspectId && t.prospect_id && normalizeProspectId(t.prospect_id) === currentThreadProspectId;
+  });
+  const sortedTasks = activeTask ? [activeTask, ...state.tasks.filter(t => t.id !== activeTask.id)] : state.tasks;
+  const hasActiveTask = !!activeTask;
+
+  const rows = sortedTasks.map(task => {
     const isActioned = !!state.actionedTasks[task.id];
     const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
     const campaignHtml = buildCampaignPill(task);
     const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
     const fuLabel = getFollowUpLabel(task.data_type);
 
-    const isActive = !isActioned;
+    const isActive = !isActioned && hasActiveTask ? task.id === activeTask.id : false;
+    const isBlocked = isFollowUpBlocked(task.id);
+    const isChecking = isFollowUpChecking(task.id);
+    const blockTitle = isBlocked ? getFollowUpBlockTitle(task.id) : '';
+    const followUpButtonActive = isActive && !isBlocked && !isChecking;
+    const notRightChatTitle = 'Not the correct prospect chat';
+    const sendButtonTitle = isChecking
+      ? 'Checking the chat...'
+      : isBlocked
+        ? blockTitle
+        : (!followUpButtonActive ? notRightChatTitle : '');
+    const disconnectDisabled = hasActiveTask ? !isActive : true;
+    const copyButtonDisabled = hasActiveTask ? !isActive || isBlocked || isChecking : true;
+    const rowClass = isActioned ? '' : (isActive ? ' cr-row-active' : ' cr-row-inactive');
+    const rowStyle = isActive && (isBlocked || isChecking) ? 'position:relative;' : '';
+    const overlayHtml = isActive && (isBlocked || isChecking) ? `
+        <div style="position:absolute; inset:0; background:rgba(255,255,255,0.92); display:flex; align-items:center; justify-content:center; padding:14px; text-align:center; z-index:2; line-height:1.4;">
+          <div style="max-width:320px;">
+            <div style="font-weight:600; margin-bottom:8px; display:flex; align-items:center; justify-content:center; gap:8px;">
+              <span style="font-size:16px;">⏳</span>
+              ${isChecking ? 'Checking chat…' : 'Synchronizing chat…'}
+            </div>
+            <div style="font-size:13px; color:#333;">
+              ${isChecking
+                ? 'This is the correct task for the prospect, but actions are temporarily blocked while the chat is verified first.'
+                : 'If you have already sent the follow-up before the check is over, delete it NOW (LinkedIn gives us 5 minutes to do this).'}
+            </div>
+          </div>
+        </div>` : '';
 
     if (isActioned) {
       return `
@@ -1156,7 +1510,8 @@ function buildFollowUpList() {
     }
 
     return `
-      <div class="revoke-row${isActive ? ' cr-row-active' : ''}">
+      <div class="revoke-row${rowClass}"${rowStyle ? ` style="${rowStyle}"` : ''}>
+        ${overlayHtml}
         <div class="revoke-line1">
           ${task.profile_url
             ? `<a href="${esc(task.profile_url)}" class="revoke-url" data-cr-nav="${esc(task.profile_url)}">${esc(task.profile_url)}</a>`
@@ -1174,13 +1529,14 @@ function buildFollowUpList() {
         <div class="revoke-line2">
           ${campaignHtml}
           <span class="revoke-actions">
-            <button class="btn btn-send btn-xs${isActive ? ' cr-send-active' : ''}" data-action="follow_up" data-tid="${task.id}">Send</button>
-            ${buildDisconnectBtn(task.id, 'btn-xs')}
+            <button class="btn btn-send btn-xs${followUpButtonActive ? ' cr-send-active' : ''}" data-action="follow_up" data-tid="${task.id}"${!followUpButtonActive ? ' disabled' : ''}${sendButtonTitle ? ` title="${esc(sendButtonTitle)}"` : ''}>Send</button>
+            <button class="btn btn-danger btn-xs" data-action="disconnect" data-tid="${task.id}"${disconnectDisabled ? ` disabled title="${esc(notRightChatTitle)}"` : ''}>Disconnect</button>
           </span>
         </div>
-        ${task.content ? `
+        ${(isBlocked || isChecking) ? `<div class="small-note" style="margin-top:4px;color:#666;">${isChecking ? 'This task belongs to the correct prospect; the chat is being verified now. Actions are temporarily blocked.' : 'If you already sent the follow-up before the check is over, delete it NOW (LinkedIn gives us 5 minutes to do this).'} </div>` : ''}
+        ${task.content && isActive ? `
         <div class="cr-content-wrap">
-          <button class="cr-copy-btn" data-copy="${esc(task.content)}" title="Copy message">
+          <button class="cr-copy-btn" data-copy="${esc(task.content)}" title="${copyButtonDisabled ? esc(notRightChatTitle) : 'Copy message'}"${copyButtonDisabled ? ' disabled' : ''}>
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
@@ -1205,6 +1561,9 @@ function buildChatterTasksList() {
   const rows = state.tasks.map(task => {
     const tid = task.documentId;
     const action = state.chatterAction[tid] || '';
+    const aiSuggestion = state.chatterAiSuggestion[tid] || '';
+    const aiLoading = !!state.chatterAiLoading[tid];
+    const aiError = state.chatterAiError[tid] || null;
     const sentKind = state.chatterSent[tid];
     const isDisconnected = !!state.chatterDisconnected[tid];
     const followUpChecked = !!state.chatterFollowUp[tid];
@@ -1321,12 +1680,16 @@ function buildChatterTasksList() {
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>
               Back to campaign
             </button>
+            <button class="ct-action-tab ${action === 'ai_suggestion' ? 'active' : ''}" disabled title="Coming soon" style="opacity:0.45;cursor:not-allowed;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 0-7.07 17.07L12 22l7.07-2.93A10 10 0 0 0 12 2zm0 3a4 4 0 1 1-4 4 4 4 0 0 1 4-4zm0 14.5c-2.33 0-4.4-1.17-5.7-2.95.35-1.89 3.8-2.95 5.7-2.95s5.35 1.06 5.7 2.95C16.4 18.33 14.33 19.5 12 19.5z"></path></svg>
+              AI Suggestion
+            </button>
             ${hasOtherDmuCampaigns ? `
             <button class="ct-action-tab ${action === 'other_dmu' ? 'active' : ''}" data-ct-set-action="other_dmu" data-ct-tid="${esc(tid)}">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
               Other DMU
             </button>` : `
-            <button class="ct-action-tab" disabled title="No Other DMU campaign available for this profile. Contact the operations team." style="opacity:0.45;cursor:not-allowed;">
+            <button class="ct-action-tab" disabled title="No Other DMU campaign available for this profile." style="opacity:0.45;cursor:not-allowed;">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
               Other DMU
             </button>`}
@@ -1336,42 +1699,9 @@ function buildChatterTasksList() {
             </button>
           </div>
 
-          ${action === 'send_message' ? `
+          ${action === 'ai_suggestion' ? `
           <div class="ct-form">
-            <label class="ct-label">Message <span class="ct-label-hint">— what you sent to the prospect</span></label>
-            <textarea class="ct-input" id="ct-msg-${esc(tid)}" placeholder="Type the message you sent…" rows="3"></textarea>
-            <label class="ct-label">Date sent</label>
-            <input type="date" class="ct-input" id="ct-date-${esc(tid)}" />
-            <label class="ct-checkbox-row">
-              <input type="checkbox" class="ct-followup-toggle" data-ct-tid="${esc(tid)}" ${followUpChecked ? 'checked' : ''} />
-              Schedule a follow-up
-            </label>
-            ${followUpChecked ? `
-              <label class="ct-label">Follow-up date</label>
-              <input type="date" class="ct-input" id="ct-fudate-${esc(tid)}" />` : ''}
-            <button class="btn btn-primary btn-xs" data-ct-action="send_message" data-ct-tid="${esc(tid)}" ${sentKind === 'message' ? 'disabled' : ''}>
-              ${sentKind === 'message' ? '✓ Message recorded' : 'Confirm message sent'}
-            </button>
-          </div>` : ''}
-
-          ${action === 'forward_client' ? `
-          <div class="ct-form">
-            <p class="ct-hint">Pass this prospect's contact details to the client.</p>
-            <label class="ct-label">Prospect email</label>
-            <input type="email" class="ct-input" id="ct-email-${esc(tid)}" placeholder="name@example.com" />
-            <label class="ct-label">Prospect phone</label>
-            <input type="tel" class="ct-input" id="ct-phone-${esc(tid)}" placeholder="+31 6 …" />
-            <button class="btn btn-primary btn-xs" data-ct-action="forward_client" data-ct-tid="${esc(tid)}" ${sentKind === 'forwarded' ? 'disabled' : ''}>
-              ${sentKind === 'forwarded' ? '✓ Forwarded to client' : 'Forward to client'}
-            </button>
-          </div>` : ''}
-
-          ${action === 'back_campaign' ? `
-          <div class="ct-form">
-            <p class="ct-hint">Send this prospect back into the campaign flow (a new follow-up will be scheduled).</p>
-            <button class="btn btn-primary btn-xs" data-ct-action="back_campaign" data-ct-tid="${esc(tid)}" ${sentKind === 'back_campaign' ? 'disabled' : ''}>
-              ${sentKind === 'back_campaign' ? '✓ Sent back to campaign' : 'Send back to campaign'}
-            </button>
+            <p class="ct-hint">AI Suggestion is coming soon.</p>
           </div>` : ''}
 
           ${action === 'disconnect' ? `
@@ -1620,6 +1950,40 @@ async function handleChatterDisconnect(tid) {
     render();
   } catch (err) {
     showToast(`Failed to disconnect: ${err.message}`, 'error');
+  }
+}
+
+async function handleChatterAiSuggestion(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  state.chatterAiLoading[tid] = true;
+  state.chatterAiError[tid] = null;
+  render();
+
+  try {
+    const result = await apiPost('/api/extension/chatter-ai-suggestion', {
+      documentId: task.documentId || tid,
+    });
+    if (!result || !result.suggestion) {
+      throw new Error(result?.message || 'No suggestion returned');
+    }
+    state.chatterAiSuggestion[tid] = result.suggestion;
+  } catch (err) {
+    state.chatterAiError[tid] = err?.message || String(err);
+  } finally {
+    state.chatterAiLoading[tid] = false;
+    render();
+  }
+}
+
+async function handleCopyAiSuggestion(tid) {
+  const text = state.chatterAiSuggestion[tid];
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('AI suggestion copied to clipboard');
+  } catch (err) {
+    showToast('Failed to copy suggestion', 'error');
   }
 }
 
@@ -1976,7 +2340,7 @@ function buildChatScraperArea() {
   }
 
   if (cs.error) {
-    return toolbar + `<div class="error-msg" style="margin-top:8px">${esc(cs.error)}</div>`;
+    return toolbar + `<div class="error-msg" style="margin-top:8px">${esc(cs.error)}<br />Please retry the current chat before switching away.</div>`;
   }
 
   if (cs.status === 'idle') {
@@ -2299,18 +2663,23 @@ function setupGlobalDelegation() {
       // Auto-load tasks for the new step using the already-applied filters,
       // so the user doesn't have to press Apply again after switching steps.
       if (newStep.key !== 'connection_acceptance' && newStep.key !== 'chat_scraper' && newStep.enabled && state.appliedProfileId) {
-        loadAllTasks();
+        loadAllTasks().then(() => {
+          if (STEPS[state.currentStep]?.key === 'follow_up') autoCheckActiveFollowUpTask().catch(() => {});
+        });
       } else {
         render();
+        if (newStep.key === 'follow_up') autoCheckActiveFollowUpTask().catch(() => {});
       }
       return;
     }
 
-    // View toggle
-    const viewBtn = e.target.closest('.btn-toggle[data-view]');
+    const viewBtn = e.target.closest('[data-view]');
     if (viewBtn) {
-      state.viewMode = viewBtn.dataset.view;
-      render();
+      const selectedView = viewBtn.dataset.view;
+      if (selectedView === 'queue' || selectedView === 'list') {
+        state.viewMode = selectedView;
+        render();
+      }
       return;
     }
 
@@ -2394,6 +2763,8 @@ function setupGlobalDelegation() {
         case 'forward_client': handleChatterForwardClient(tid); break;
         case 'back_campaign':  handleChatterBackCampaign(tid); break;
         case 'disconnect':     handleChatterDisconnect(tid); break;
+        case 'generate_ai_suggestion': handleChatterAiSuggestion(tid); break;
+        case 'copy_ai_suggestion': handleCopyAiSuggestion(tid); break;
         case 'other_dmu':      handleChatterOtherDmu(tid); break;
         case 'dmu_toggle':     ctDmuToggle(tid, ctBtn.dataset.ctVal); break;
       }
@@ -2635,6 +3006,11 @@ function attachListeners() {
     state.pendingProspectId = '';
     state.pendingProspectName = '';
     state.pendingProspectUrl = '';
+    state.acceptanceResult = null;
+    state.tasks = [];
+    state.totalTasks = 0;
+    state.actionedTasks = {};
+    state.contactDetails = {};
     // Reset content script dedup state so the same person can be re-detected
     chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
       if (tabs[0]?.id) {
@@ -2719,13 +3095,13 @@ function attachListeners() {
       chrome.tabs.sendMessage(tabId, { type: 'SCRAPE_CHAT', cutoffMs }, response => {
         if (chrome.runtime.lastError || !response) {
           state.chatScraper.status = 'idle';
-          state.chatScraper.error = 'Could not reach the LinkedIn page. Try reloading it. If the problem persists,' + DEV_MSG;
+          state.chatScraper.error = 'Could not reach the LinkedIn page. Reload the page and try again. If the problem persists, check your connection or contact support.';
           render();
           return;
         }
         if (response.error) {
           state.chatScraper.status = 'idle';
-          state.chatScraper.error = response.error;
+          state.chatScraper.error = `${response.error} Please fix the issue and retry scraping.`;
           render();
           return;
         }
@@ -2791,7 +3167,11 @@ function attachListeners() {
       render();
     } catch (err) {
       state.chatScraper.status = 'ready';
-      state.chatScraper.error = 'Send failed: ' + err.message + DEV_MSG;
+      const message = err?.message || String(err);
+      const networkError = /network|fetch|failed to fetch|timeout/i.test(message);
+      state.chatScraper.error = networkError
+        ? 'Sending to backend failed due to a network or connection issue. Please try again before leaving this chat.'
+        : `Sending to backend failed: ${message}. Please retry before leaving this chat.`;
       render();
     }
   });
@@ -2834,7 +3214,6 @@ async function doLogin() {
     state.userName = data.user?.username || data.user?.email || '';
     state.userType = userType;
     state.currentStep = firstVisibleStepIndex();
-    console.log('[Auth] Set backendUrl to:', state.backendUrl);
     await saveAuth(data.jwt, backendUrl, state.userName, state.userType);
     await bootMainView();
   } catch (err) {
@@ -2901,6 +3280,10 @@ async function loadCustomers() {
     }
   } catch (err) {
     console.error('loadCustomers failed:', err);
+    showToast('Failed to load customers: ' + err.message, 'error');
+    if (err.message?.includes('Failed to fetch')) {
+      state.error = 'Could not reach the backend. Check your network or backend URL.';
+    }
     // If auth error, redirect to login; otherwise stay and let user retry
     if (err.message?.includes('401') || err.message?.includes('403')) {
       await clearAuth();
@@ -2952,13 +3335,30 @@ async function bootMainView() {
 // =============================================================================
 
 chrome.runtime.onMessage.addListener(message => {
-  console.log('[Sidepanel] Received runtime message:', message.type, message);
   if (message.type === 'PAGE_URL' || message.type === 'TAB_URL_CHANGED') {
     const newUrl = message.url || '';
     if (newUrl === state.currentTabUrl) return;
     state.currentTabUrl = newUrl;
 
+    if (!newUrl.includes('/overlay/contact-info')) {
+      state.currentOverlayProspectId = '';
+      state.currentOverlayProfileUrl = '';
+      state.lastOverlayWarningUrl = '';
+    }
+
     const step = STEPS[state.currentStep];
+    if (isMessagingThreadUrl(newUrl)) {
+      refreshCurrentThreadProspectId()
+        .then(() => {
+          if (state.view === 'main' && (step.key === 'connection_request' || step.key === 'follow_up') && !state.loading && state.tasks.length > 0) {
+            if (step.key === 'follow_up') autoCheckActiveFollowUpTask().catch(() => {});
+            render();
+          }
+        })
+        .catch(() => {});
+    } else {
+      state.currentThreadProspectId = '';
+    }
 
     // Connection Request / Follow-Up step: full re-render to highlight the matching row
     if (state.view === 'main' && (step.key === 'connection_request' || step.key === 'follow_up') && !state.loading && state.tasks.length > 0) {
@@ -2982,9 +3382,11 @@ chrome.runtime.onMessage.addListener(message => {
 
   // Hover detection — primary: auto-fill prospect ID from Message button
   if (message.type === 'HOVERED_PROSPECT_ID') {
-    console.log('[Sidepanel] Received HOVERED_PROSPECT_ID:', message.prospectId);
     const step = STEPS[state.currentStep];
     if (state.view !== 'main' || step.key !== 'connection_acceptance') return;
+
+    // Pin the current prospect selection until the user clears it.
+    if (state.pendingProspectId || state.pendingProspectUrl) return;
 
     const id = message.prospectId || '';
     if (id === state.pendingProspectId) return;
@@ -2997,12 +3399,11 @@ chrome.runtime.onMessage.addListener(message => {
 
   // Hover detection — backup: auto-fill prospect URL from hovering the person's name
   if (message.type === 'HOVERED_PROSPECT_URL') {
-    console.log('[Sidepanel] Received HOVERED_PROSPECT_URL:', message.profileUrl);
     const step = STEPS[state.currentStep];
     if (state.view !== 'main' || step.key !== 'connection_acceptance') return;
 
-    // Only use URL backup when the primary prospect ID is not yet known
-    if (state.pendingProspectId) return;
+    // Pin the current prospect selection until the user clears it.
+    if (state.pendingProspectId || state.pendingProspectUrl) return;
 
     const url = message.profileUrl || '';
     if (url === state.pendingProspectUrl) return;
@@ -3013,11 +3414,52 @@ chrome.runtime.onMessage.addListener(message => {
 
   // Contact info scraper — auto-fill email, phone, birthday, date_connected
   if (message.type === 'CONTACT_INFO' && message.data) {
-    console.log('[Sidepanel] Received CONTACT_INFO:', message.data);
     if (state.view !== 'main') return;
 
-    // Find the task ID for the currently visible card
+    if (message.data.prospect_id) {
+      state.currentOverlayProspectId = message.data.prospect_id;
+    } else {
+      state.currentOverlayProspectId = '';
+    }
+    if (message.data.profile_url) {
+      state.currentOverlayProfileUrl = message.data.profile_url;
+    }
+
+    const selectedId = getSelectedConnectionProspectIdRaw();
+    const selectedUrl = getSelectedConnectionProfileUrl();
+    const profileName = getAppliedProfileName();
+    const overlayMatch = isConnectionAcceptanceOverlayMatch();
+
+    // If we are on step 1, only populate contact fields when the overlay matches the selected prospect.
     const step = STEPS[state.currentStep];
+    if (step.key === 'connection_acceptance' && !overlayMatch) {
+      if (!message.data.prospect_id && state.currentTabUrl.includes('/overlay/contact-info')) {
+        if (state.lastOverlayWarningUrl !== state.currentTabUrl) {
+          showToast('Could not extract Prospect ID, please refresh the page and try again.', 'error');
+          state.lastOverlayWarningUrl = state.currentTabUrl;
+        }
+        return;
+      }
+
+      if (state.currentOverlayProspectId) {
+        reportBlockedUserMistake({
+          action: 'connection_acceptance',
+          reason: 'overlay_mismatch',
+          note: 'System blocked contact-info autofill and Connect because the current overlay does not match the selected prospect. If you are on the correct profile, refresh the page and try again.',
+          profileId: state.appliedProfileId || null,
+          profileName: profileName || null,
+          selectedProspectId: selectedId || null,
+          selectedProspectUrl: selectedUrl || null,
+          overlayProspectId: state.currentOverlayProspectId || null,
+          overlayProfileUrl: state.currentOverlayProfileUrl || null,
+          currentTabUrl: state.currentTabUrl || null,
+          acceptanceStatus: state.acceptanceResult?.status || null,
+        });
+      }
+      return;
+    }
+
+    // Find the task ID for the currently visible card
     let tid = null;
     if (step.key === 'connection_acceptance') {
       // First-connection or open_task
@@ -3042,6 +3484,8 @@ chrome.runtime.onMessage.addListener(message => {
         if (input) input.value = message.data[field];
       }
     }
+
+    render();
   }
 });
 
@@ -3050,16 +3494,12 @@ chrome.runtime.onMessage.addListener(message => {
 // =============================================================================
 
 async function init() {
-  console.log('[Init] Starting extension initialization');
   setupGlobalDelegation();
   await loadStoredAuth();
-  console.log('[Init] After loading auth, token present:', !!state.token, 'backendUrl:', state.backendUrl);
 
   if (state.token) {
-    console.log('[Init] Token found, booting main view');
     await bootMainView();
   } else {
-    console.log('[Init] No token, showing login view');
     state.view = 'login';
     render();
   }

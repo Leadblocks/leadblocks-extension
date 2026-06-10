@@ -67,10 +67,8 @@ window.addEventListener('popstate', sendUrl);
 // handler that might call stopPropagation().
 // =============================================================================
 
-console.log('[Content] Content script loaded on:', window.location.href);
 
 (function initHoverDetection() {
-  console.log('[Content] Initializing hover detection');
 
   const MSG_URN_RE  = /[?&]profileUrn=urn(?:%3A|:)li(?:%3A|:)fsd_profile(?:%3A|:)([A-Za-z0-9_-]+)/i;
   const LI_PROFILE_RE = /linkedin\.com\/in\/([^/?#\s]+)/i;
@@ -100,7 +98,6 @@ console.log('[Content] Content script loaded on:', window.location.href);
       const nameMatch = ariaLabel.match(/(?:(?:send\s+a\s+message|message)\s+to|naar)\s+(.+?)(?:\s*,.*)?$/i);
       const prospectName = nameMatch ? nameMatch[1].trim() : '';
 
-      console.log('[Hover] Prospect ID extracted:', prospectId, '| Name:', prospectName);
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         if (!chrome.runtime?.id) return;
@@ -108,7 +105,6 @@ console.log('[Content] Content script loaded on:', window.location.href);
           lastSentId  = prospectId;
           lastSentUrl = ''; // primary wins — discard any pending URL signal
           chrome.runtime.sendMessage({ type: 'HOVERED_PROSPECT_ID', prospectId, prospectName }).catch(() => {});
-          console.log('[Hover] Sent HOVERED_PROSPECT_ID:', prospectId, '| Name:', prospectName);
         } catch (_) {}
       }, 150);
       return;
@@ -127,7 +123,6 @@ console.log('[Content] Content script loaded on:', window.location.href);
       try {
         lastSentUrl = profileUrl;
         chrome.runtime.sendMessage({ type: 'HOVERED_PROSPECT_URL', profileUrl }).catch(() => {});
-        console.log('[Hover] Sent HOVERED_PROSPECT_URL:', profileUrl);
       } catch (_) {}
     }, 150);
   }
@@ -168,7 +163,6 @@ console.log('[Content] Content script loaded on:', window.location.href);
     const target = document.body || document.documentElement;
     if (!target) return;
     cardObserver.observe(target, { childList: true, subtree: true });
-    console.log('[Hover] Hover-card observer started');
   };
 
   // Reset lastSentId on navigation so a new prospect can be detected fresh
@@ -187,7 +181,6 @@ console.log('[Content] Content script loaded on:', window.location.href);
       lastSentId  = '';
       lastSentUrl = '';
       clearTimeout(debounceTimer);
-      console.log('[Hover] State reset by sidepanel');
     }
   });
 })();
@@ -261,9 +254,103 @@ console.log('[Content] Content script loaded on:', window.location.href);
     return valueEl.textContent.trim();
   }
 
+  function extractOverlayProspectId() {
+    // LinkedIn overlay pages often embed the internal profile ID in componentkey values.
+    const regexes = [
+      /ref([A-Za-z0-9_-]+?)ContactInfoDetailSection/,
+      /ref([A-Za-z0-9_-]+?)ContactInfo/i,
+    ];
+
+    const nodes = Array.from(document.querySelectorAll('[componentkey]'));
+    for (const node of nodes) {
+      const componentKey = node.getAttribute('componentkey') || '';
+      for (const regex of regexes) {
+        const match = componentKey.match(regex);
+        if (match && match[1]) {
+          return match[1];
+        }
+      }
+    }
+
+    // Fallback: scan every element attribute for the same patterns.
+    const allElements = Array.from(document.querySelectorAll('*'));
+    for (const el of allElements) {
+      for (const attrName of el.getAttributeNames()) {
+        const attrValue = el.getAttribute(attrName) || '';
+        for (const regex of regexes) {
+          const match = attrValue.match(regex);
+          if (match && match[1]) {
+            return match[1];
+          }
+        }
+      }
+    }
+
+    // Fallback: if the prospect id appears anywhere in the contact-info overlay HTML,
+    // it is very likely the correct profile page.
+    const html = document.documentElement.outerHTML || '';
+    for (const regex of regexes) {
+      const match = html.match(regex);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+
+    return '';
+  }
+
+  function extractOverlayProfileUrl() {
+    const profileLink = document.querySelector('a[href*="/linkedin.com/in/"]');
+    if (profileLink) {
+      const href = profileLink.href || '';
+      const slugMatch = href.match(/linkedin\.com\/in\/([^/?#\s]+)/i);
+      if (slugMatch) {
+        const url = `https://www.linkedin.com/in/${slugMatch[1].toLowerCase()}/`;
+        return url;
+      }
+    }
+
+    // Fallback: derive the profile URL directly from the overlay page path.
+    const pageUrl = window.location.href || '';
+    const pageMatch = pageUrl.match(/linkedin\.com\/in\/([^/?#\s]+)/i);
+    if (pageMatch) {
+      const url = `https://www.linkedin.com/in/${pageMatch[1].toLowerCase()}/`;
+      return url;
+    }
+
+    return '';
+  }
+
+  function findValueElement(labelEl) {
+    if (!labelEl) return null;
+    const next = labelEl.nextElementSibling;
+    if (next && next.textContent.trim()) return next;
+
+    const parent = labelEl.parentElement;
+    if (!parent) return null;
+
+    const children = Array.from(parent.children);
+    const index = children.indexOf(labelEl);
+    if (index !== -1 && index < children.length - 1) {
+      const sibling = children[index + 1];
+      if (sibling && sibling.textContent.trim()) return sibling;
+    }
+
+    if (children.length === 2 && children[0] === labelEl) {
+      const sibling = children[1];
+      if (sibling && sibling.textContent.trim()) return sibling;
+    }
+
+    return null;
+  }
+
   /** Scrape all contact info sections from the current page */
   function scrapeContactInfo() {
     const result = {};
+    const overlayProspectId = extractOverlayProspectId();
+    if (overlayProspectId) result.prospect_id = overlayProspectId;
+    const overlayProfileUrl = extractOverlayProfileUrl();
+    if (overlayProfileUrl) result.profile_url = overlayProfileUrl;
 
     // Pattern 1: <p> label + <p> value (primary — used by most LinkedIn locales)
     for (const p of document.querySelectorAll('p')) {
@@ -285,6 +372,16 @@ console.log('[Content] Content script loaded on:', window.location.href);
       if (value) result[field] = value;
     }
 
+    // Pattern 3: label/value pairs rendered inside div/span groups
+    for (const el of document.querySelectorAll('div, span')) {
+      const field = LABEL_MAP[el.textContent.trim().toLowerCase()];
+      if (!field || result[field]) continue;
+      const valueEl = findValueElement(el);
+      if (!valueEl) continue;
+      const value = extractFieldValue(field, valueEl);
+      if (value) result[field] = value;
+    }
+
     return Object.keys(result).length > 0 ? result : null;
   }
 
@@ -303,13 +400,10 @@ console.log('[Content] Content script loaded on:', window.location.href);
     clearTimeout(scrapeTimer);
     scrapeTimer = setTimeout(() => {
       const info = scrapeContactInfo();
-      if (!info) return;
-
       lastScrapedUrl = url;
       if (!chrome.runtime?.id) return;
       try {
-        chrome.runtime.sendMessage({ type: 'CONTACT_INFO', data: info }).catch(() => {});
-        console.log('[Content] Sent CONTACT_INFO:', info);
+        chrome.runtime.sendMessage({ type: 'CONTACT_INFO', data: info || {} }).catch(() => {});
       } catch (_) {}
     }, 300);
   });
@@ -318,7 +412,6 @@ console.log('[Content] Content script loaded on:', window.location.href);
     const target = document.body || document.documentElement;
     if (!target) return;
     observer.observe(target, { childList: true, subtree: true });
-    console.log('[Content] Contact info observer started');
   };
 
   if (document.body) startObserver();
@@ -362,8 +455,7 @@ console.log('[Content] Content script loaded on:', window.location.href);
     }
   }
 
-  function scrapeChat(cutoffMs = 0) {
-    // Contact LinkedIn ID — from thread header profile link
+  function getThreadContactInfo() {
     let contactId = null;
     const profileLinks = document.querySelectorAll(
       '.msg-thread__top-bar a[href*="/in/"], .msg-entity-lockup a[href*="/in/"], .msg-thread__link-to-profile'
@@ -373,7 +465,6 @@ console.log('[Content] Content script loaded on:', window.location.href);
       if (m) { contactId = m[1]; break; }
     }
 
-    // Contact display name — from thread header title element
     let contactName = '';
     const nameEl = document.querySelector(
       '.msg-entity-lockup__entity-title, .msg-thread__headline, h2.msg-conversation-card__participant-names'
@@ -381,10 +472,20 @@ console.log('[Content] Content script loaded on:', window.location.href);
     if (nameEl) {
       contactName = nameEl.textContent.trim();
     } else {
-      // Fallback: parse page title e.g. "Messaging | John Doe | LinkedIn"
       const titleMatch = document.title.match(/^Messaging\s*[|–-]\s*(.+?)\s*[|–-]/);
       if (titleMatch) contactName = titleMatch[1].trim();
     }
+
+    return {
+      profile_id: contactId || '',
+      contact_name: contactName || ''
+    };
+  }
+
+  function scrapeChat(cutoffMs = 0) {
+    const threadContact = getThreadContactInfo();
+    const contactId = threadContact.profile_id || null;
+    const contactName = threadContact.contact_name || '';
 
     // Primary selectors; fallbacks added for resilience against LinkedIn class renames.
     // Note: the actual outer class is msg-s-message-list-container (hyphens only),
@@ -514,8 +615,20 @@ console.log('[Content] Content script loaded on:', window.location.href);
       return true;
     }
 
-    console.log('[Content] SCRAPE_CHAT: found', data.messages.length, 'messages');
     sendResponse({ data });
+    return true;
+  });
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type !== 'EXTRACT_THREAD_CONTACT_ID') return;
+
+    if (!THREAD_RE.test(window.location.href)) {
+      sendResponse({ data: { profile_id: '', contact_name: '' } });
+      return true;
+    }
+
+    const contactInfo = getThreadContactInfo();
+    sendResponse({ data: contactInfo });
     return true;
   });
 })();
