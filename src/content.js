@@ -255,44 +255,35 @@ window.addEventListener('popstate', sendUrl);
   }
 
   function extractOverlayProspectId() {
-    // LinkedIn overlay pages often embed the internal profile ID in componentkey values.
-    const regexes = [
+    // Pattern 1: componentkey attribute contains ref<ID>ContactInfo[DetailSection]
+    const componentkeyRegexes = [
       /ref([A-Za-z0-9_-]+?)ContactInfoDetailSection/,
       /ref([A-Za-z0-9_-]+?)ContactInfo/i,
     ];
-
     const nodes = Array.from(document.querySelectorAll('[componentkey]'));
     for (const node of nodes) {
       const componentKey = node.getAttribute('componentkey') || '';
-      for (const regex of regexes) {
+      for (const regex of componentkeyRegexes) {
         const match = componentKey.match(regex);
-        if (match && match[1]) {
-          return match[1];
-        }
+        if (match && match[1]) return match[1];
       }
     }
 
-    // Fallback: scan every element attribute for the same patterns.
+    // Pattern 2: fsd_profile URN anywhere in the page (JSON data, script tags, data attrs)
+    const urnRegex = /urn(?:%3A|:)li(?:%3A|:)fsd_profile(?:%3A|:)([A-Za-z0-9_-]+)/i;
+    const html = document.documentElement.outerHTML || '';
+    const urnMatch = html.match(urnRegex);
+    if (urnMatch && urnMatch[1]) return urnMatch[1];
+
+    // Pattern 3: full attribute scan for componentkey patterns (catches shadow-rendered nodes)
     const allElements = Array.from(document.querySelectorAll('*'));
     for (const el of allElements) {
       for (const attrName of el.getAttributeNames()) {
         const attrValue = el.getAttribute(attrName) || '';
-        for (const regex of regexes) {
+        for (const regex of componentkeyRegexes) {
           const match = attrValue.match(regex);
-          if (match && match[1]) {
-            return match[1];
-          }
+          if (match && match[1]) return match[1];
         }
-      }
-    }
-
-    // Fallback: if the prospect id appears anywhere in the contact-info overlay HTML,
-    // it is very likely the correct profile page.
-    const html = document.documentElement.outerHTML || '';
-    for (const regex of regexes) {
-      const match = html.match(regex);
-      if (match && match[1]) {
-        return match[1];
       }
     }
 
@@ -385,26 +376,38 @@ window.addEventListener('popstate', sendUrl);
     return Object.keys(result).length > 0 ? result : null;
   }
 
-  let lastScrapedUrl = '';
+  let lastScrapedUrl = '';   // URL for which we already got a prospect_id (stops retrying)
+  let lastAttemptUrl = '';   // URL we are currently attempting (for retry count reset)
+  let scrapeAttempts = 0;
   let scrapeTimer = null;
+  const MAX_SCRAPE_ATTEMPTS = 6;
 
   const observer = new MutationObserver(() => {
     const url = window.location.href;
     if (!url.includes('/overlay/contact-info')) {
       lastScrapedUrl = '';
+      lastAttemptUrl = '';
+      scrapeAttempts = 0;
       return;
     }
-    if (url === lastScrapedUrl) return;
+    if (url === lastScrapedUrl) return; // already resolved prospect_id for this URL
+    if (url !== lastAttemptUrl) {
+      lastAttemptUrl = url;
+      scrapeAttempts = 0;
+    }
+    if (scrapeAttempts >= MAX_SCRAPE_ATTEMPTS) return; // gave up on this URL
 
     // Debounce to let all sections render before scraping
     clearTimeout(scrapeTimer);
     scrapeTimer = setTimeout(() => {
+      scrapeAttempts++;
       const info = scrapeContactInfo();
-      lastScrapedUrl = url;
       if (!chrome.runtime?.id) return;
       try {
         chrome.runtime.sendMessage({ type: 'CONTACT_INFO', data: info || {} }).catch(() => {});
       } catch (_) {}
+      // Only lock the URL once we resolved a prospect_id — allows retries if SDUI renders late
+      if (info?.prospect_id) lastScrapedUrl = url;
     }, 300);
   });
 

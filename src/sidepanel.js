@@ -250,13 +250,14 @@ function isConnectionAcceptanceOverlayMatch() {
   const idMatch = overlayId && selectedId ? overlayId === selectedId : null;
   const urlMatch = overlayUrl && selectedUrl ? urlMatches(selectedUrl, overlayUrl) : null;
 
-  if (overlayId && selectedId) {
-    return idMatch;
-  }
+  if (overlayId && selectedId) return idMatch;
+  if (overlayUrl && selectedUrl) return urlMatch;
 
-  if (overlayUrl && selectedUrl) {
-    return urlMatch;
-  }
+  // Fallback: compare overlay URL directly against the task's known profile URL.
+  // Covers the case where prospect_id extraction fails and no prospect is selected,
+  // but the overlay URL and the task URL are clearly the same person.
+  const taskUrl = state.acceptanceResult?.task?.profile_url || '';
+  if (overlayUrl && taskUrl && urlMatches(overlayUrl, taskUrl)) return true;
 
   return false;
 }
@@ -294,7 +295,8 @@ function showToast(message, type = 'success') {
 
 const followUpBlockTimers = {};
 let followUpBlockInterval = null;
-const FOLLOW_UP_BLOCK_MINUTES = 5;
+const FOLLOW_UP_BLOCK_MINUTES = 2.5;
+const FOLLOW_UP_POLL_INTERVAL_MS = 10000;
 
 function isFollowUpBlocked(taskId) {
   const expiry = state.followUpBlocked[taskId];
@@ -348,7 +350,7 @@ function formatDurationMs(ms) {
 function getFollowUpBlockTitle(taskId) {
   const remaining = getFollowUpTimeRemaining(taskId);
   const remainingText = remaining ? `Time remaining: ${formatDurationMs(remaining)}.` : '';
-  return `Action blocked for ${FOLLOW_UP_BLOCK_MINUTES} minutes, move on to another task or step 5 and come back later. ${remainingText}`;
+  return `Action blocked for up to ${FOLLOW_UP_BLOCK_MINUTES} minutes while the chat syncs — usually unblocks within seconds. ${remainingText}`;
 }
 
 function startFollowUpCountdown() {
@@ -374,10 +376,47 @@ function blockFollowUpTask(taskId, minutes = FOLLOW_UP_BLOCK_MINUTES) {
     if (state.followUpBlocked[taskId] === expiry) {
       delete state.followUpBlocked[taskId];
       delete followUpBlockTimers[taskId];
-      render();
+      if (STEPS[state.currentStep]?.key === 'follow_up') {
+        loadAllTasks();
+      } else {
+        render();
+      }
     }
   }, minutes * 60 * 1000);
   startFollowUpCountdown();
+}
+
+function blockAndPollFollowUpTask(taskId, newMessageIds) {
+  blockFollowUpTask(taskId, FOLLOW_UP_BLOCK_MINUTES);
+
+  function poll() {
+    if (!isFollowUpBlocked(taskId)) return;
+    apiPost('/api/messages/check-existing', { message_ids: newMessageIds })
+      .then(checkRes => {
+        if (!isFollowUpBlocked(taskId)) return;
+        const existingSet = new Set(checkRes.existing || []);
+        const allProcessed = newMessageIds.every(id => existingSet.has(id));
+        if (allProcessed) {
+          delete state.followUpBlocked[taskId];
+          if (followUpBlockTimers[taskId]) {
+            clearTimeout(followUpBlockTimers[taskId]);
+            delete followUpBlockTimers[taskId];
+          }
+          if (STEPS[state.currentStep]?.key === 'follow_up') {
+            loadAllTasks();
+          } else {
+            render();
+          }
+        } else if (isFollowUpBlocked(taskId)) {
+          setTimeout(poll, FOLLOW_UP_POLL_INTERVAL_MS);
+        }
+      })
+      .catch(() => {
+        if (isFollowUpBlocked(taskId)) setTimeout(poll, FOLLOW_UP_POLL_INTERVAL_MS);
+      });
+  }
+
+  setTimeout(poll, FOLLOW_UP_POLL_INTERVAL_MS);
 }
 
 function scrapeChatFromActiveTab(cutoffMs = 0) {
@@ -476,7 +515,8 @@ async function ensureFollowUpChatUpToDate(taskId) {
     customer_id: customerId,
   });
 
-  blockFollowUpTask(taskId, 2);
+  const newMessageIds = newMessages.map(m => m.message_id).filter(Boolean);
+  blockAndPollFollowUpTask(taskId, newMessageIds);
   return { upToDate: false, newMessageCount: newMessages.length };
 }
 
@@ -747,6 +787,16 @@ async function lookupConnection() {
       state.tasks = [result.task];
       state.totalTasks = 1;
     }
+
+    // Non-actionable results: unpin the prospect so the next hover immediately updates the input.
+    // Actionable results (open_task, first_connection) stay pinned so the user can act on them.
+    if (result.status === 'already_connected' || result.status === 'already_first_connected') {
+      state.pendingProspectId   = '';
+      state.pendingProspectName = '';
+      state.pendingProspectUrl  = '';
+      state.appliedProspectId   = '';
+      state.appliedProspectUrl  = '';
+    }
   } catch (err) {
     state.error = err.message;
   } finally {
@@ -852,7 +902,7 @@ async function handleFollowUp(taskId) {
       });
       delete state.actionedTasks[taskId];
       render();
-      showToast(`New chat updates were sent to the backend. This follow-up is blocked for ${FOLLOW_UP_BLOCK_MINUTES} minutes while the task syncs.`, 'error');
+      showToast(`New chat updates were sent to the backend. This follow-up will unblock automatically once the backend has processed them (up to ${FOLLOW_UP_BLOCK_MINUTES} minutes).`, 'error');
       return;
     }
 
@@ -3402,11 +3452,20 @@ chrome.runtime.onMessage.addListener(message => {
     const step = STEPS[state.currentStep];
     if (state.view !== 'main' || step.key !== 'connection_acceptance') return;
 
-    // Pin the current prospect selection until the user clears it.
-    if (state.pendingProspectId || state.pendingProspectUrl) return;
-
     const url = message.profileUrl || '';
+    if (!url) return;
+
+    const alreadyPinned = state.pendingProspectId || state.pendingProspectUrl;
+    const onContactOverlay = state.currentTabUrl.includes('/overlay/contact-info');
+
+    // On the contact-info overlay, allow a URL hover to set or override the pending URL
+    // when no prospect ID is pinned and the current selection doesn't match the overlay.
+    // This is the fallback for when prospect_id extraction fails.
+    const overlayFallback = onContactOverlay && !state.pendingProspectId && !isConnectionAcceptanceOverlayMatch();
+
+    if (alreadyPinned && !overlayFallback) return;
     if (url === state.pendingProspectUrl) return;
+
     state.pendingProspectUrl = url;
     state.pendingProspectName = '';
     render();
@@ -3435,7 +3494,7 @@ chrome.runtime.onMessage.addListener(message => {
     if (step.key === 'connection_acceptance' && !overlayMatch) {
       if (!message.data.prospect_id && state.currentTabUrl.includes('/overlay/contact-info')) {
         if (state.lastOverlayWarningUrl !== state.currentTabUrl) {
-          showToast('Could not extract Prospect ID, please refresh the page and try again.', 'error');
+          showToast('Could not extract Prospect ID. Hover the LinkedIn URL shown in the contact details to confirm the match.', 'error');
           state.lastOverlayWarningUrl = state.currentTabUrl;
         }
         return;
