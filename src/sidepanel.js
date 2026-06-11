@@ -1749,6 +1749,44 @@ function buildChatterTasksList() {
             </button>
           </div>
 
+          ${action === 'send_message' ? `
+          <div class="ct-form">
+            <label class="ct-label">Message <span class="ct-label-hint">— what you sent to the prospect</span></label>
+            <textarea class="ct-input" id="ct-msg-${esc(tid)}" placeholder="Type the message you sent…" rows="3"></textarea>
+            <label class="ct-label">Date sent</label>
+            <input type="date" class="ct-input" id="ct-date-${esc(tid)}" />
+            <label class="ct-checkbox-row">
+              <input type="checkbox" class="ct-followup-toggle" data-ct-tid="${esc(tid)}" ${followUpChecked ? 'checked' : ''} />
+              Schedule a follow-up
+            </label>
+            ${followUpChecked ? `
+              <label class="ct-label">Follow-up date</label>
+              <input type="date" class="ct-input" id="ct-fudate-${esc(tid)}" />` : ''}
+            <button class="btn btn-primary btn-xs" data-ct-action="send_message" data-ct-tid="${esc(tid)}" ${sentKind === 'message' ? 'disabled' : ''}>
+              ${sentKind === 'message' ? '✓ Message recorded' : 'Confirm message sent'}
+            </button>
+          </div>` : ''}
+
+          ${action === 'forward_client' ? `
+          <div class="ct-form">
+            <p class="ct-hint">Pass this prospect's contact details to the client.</p>
+            <label class="ct-label">Prospect email</label>
+            <input type="email" class="ct-input" id="ct-email-${esc(tid)}" placeholder="name@example.com" />
+            <label class="ct-label">Prospect phone</label>
+            <input type="tel" class="ct-input" id="ct-phone-${esc(tid)}" placeholder="+31 6 …" />
+            <button class="btn btn-primary btn-xs" data-ct-action="forward_client" data-ct-tid="${esc(tid)}" ${sentKind === 'forwarded' ? 'disabled' : ''}>
+              ${sentKind === 'forwarded' ? '✓ Forwarded to client' : 'Forward to client'}
+            </button>
+          </div>` : ''}
+
+          ${action === 'back_campaign' ? `
+          <div class="ct-form">
+            <p class="ct-hint">Send this prospect back into the campaign flow (a new follow-up will be scheduled).</p>
+            <button class="btn btn-primary btn-xs" data-ct-action="back_campaign" data-ct-tid="${esc(tid)}" ${sentKind === 'back_campaign' ? 'disabled' : ''}>
+              ${sentKind === 'back_campaign' ? '✓ Sent back to campaign' : 'Send back to campaign'}
+            </button>
+          </div>` : ''}
+
           ${action === 'ai_suggestion' ? `
           <div class="ct-form">
             <p class="ct-hint">AI Suggestion is coming soon.</p>
