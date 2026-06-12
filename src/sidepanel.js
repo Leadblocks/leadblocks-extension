@@ -462,16 +462,43 @@ function extractProspectIdFromActiveThread() {
   });
 }
 
+let threadProspectRefreshSeq = 0;
+const THREAD_PROSPECT_POLL_DELAYS_MS = [0, 500, 1000, 2000, 3500];
+
+function onCurrentThreadProspectIdChanged() {
+  if (state.view !== 'main' || state.loading || state.tasks.length === 0) return;
+  const step = STEPS[state.currentStep];
+  if (step.key === 'follow_up') {
+    autoCheckActiveFollowUpTask().catch(() => {});
+    render();
+  } else if (step.key === 'connection_request') {
+    render();
+  }
+}
+
 async function refreshCurrentThreadProspectId() {
+  const seq = ++threadProspectRefreshSeq;
   if (!isMessagingThreadUrl(state.currentTabUrl)) {
     state.currentThreadProspectId = '';
     return;
   }
-  try {
-    const data = await extractProspectIdFromActiveThread();
-    state.currentThreadProspectId = normalizeProspectId(data.profile_id || '');
-  } catch (_) {
-    state.currentThreadProspectId = '';
+  // LinkedIn renders the thread header asynchronously after the URL changes —
+  // and may briefly still show the previous conversation — so a single read is
+  // unreliable. Poll a few times and let the last settled value win; each poll
+  // round is abandoned as soon as a newer refresh starts.
+  for (const delay of THREAD_PROSPECT_POLL_DELAYS_MS) {
+    if (delay) await new Promise(r => setTimeout(r, delay));
+    if (seq !== threadProspectRefreshSeq) return;
+    let id = '';
+    try {
+      const data = await extractProspectIdFromActiveThread();
+      id = normalizeProspectId(data.profile_id || '');
+    } catch (_) {}
+    if (seq !== threadProspectRefreshSeq) return;
+    if (id !== state.currentThreadProspectId) {
+      state.currentThreadProspectId = id;
+      onCurrentThreadProspectIdChanged();
+    }
   }
 }
 
@@ -1499,10 +1526,15 @@ function getFollowUpLabel(dataType) {
 
 function buildFollowUpList() {
   const currentThreadProspectId = getCurrentThreadProspectId();
+  // Primary: match the prospect of the open messaging thread.
+  // Backup: the prospect can't always be found in the messaging page — also
+  // unlock when the user is on the prospect's profile page itself.
   const activeTask = state.tasks.find(t => {
     if (state.actionedTasks[t.id]) return false;
     return currentThreadProspectId && t.prospect_id && normalizeProspectId(t.prospect_id) === currentThreadProspectId;
-  });
+  }) || state.tasks.find(t =>
+    !state.actionedTasks[t.id] && t.profile_url && urlMatches(t.profile_url, state.currentTabUrl)
+  );
   const sortedTasks = activeTask ? [activeTask, ...state.tasks.filter(t => t.id !== activeTask.id)] : state.tasks;
   const hasActiveTask = !!activeTask;
 
@@ -1518,7 +1550,7 @@ function buildFollowUpList() {
     const isChecking = isFollowUpChecking(task.id);
     const blockTitle = isBlocked ? getFollowUpBlockTitle(task.id) : '';
     const followUpButtonActive = isActive && !isBlocked && !isChecking;
-    const notRightChatTitle = 'Not the correct prospect chat';
+    const notRightChatTitle = "Open this prospect's chat or profile page to enable";
     const sendButtonTitle = isChecking
       ? 'Checking the chat...'
       : isBlocked
@@ -1569,13 +1601,22 @@ function buildFollowUpList() {
           <span class="badge badge-fu">${esc(fuLabel)}</span>
           ${dueHtml}
         </div>
-        ${name ? `<button class="fu-name-chip" data-copy="${esc(name)}" title="Click to copy name">
-          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-          ${esc(name)}
-        </button>` : ''}
+        <div style="display: flex; gap: 6px; margin-top: 4px;">
+          ${name ? `<button class="fu-name-chip" data-copy="${esc(name)}" title="Click to copy name">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            ${esc(name)}
+          </button>` : ''}
+          ${task.first_name ? `<button class="fu-name-chip" data-copy="${esc(task.first_name)}" title="Click to copy first name">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            ${esc(task.first_name)}
+          </button>` : ''}
+        </div>
         <div class="revoke-line2">
           ${campaignHtml}
           <span class="revoke-actions">
@@ -1597,11 +1638,34 @@ function buildFollowUpList() {
         </div>` : ''}
       </div>
     `;
-  }).join('');
+  });
+
+  // Split the list so the single unlocked task is unmistakable: it sits alone
+  // under "Ready to send"; everything else is grouped under "Locked".
+  let listHtml;
+  if (hasActiveTask) {
+    const [activeRow, ...restRows] = rows;
+    listHtml = `
+      <div class="fu-list-label fu-list-label-ready">✓ Ready to send</div>
+      ${activeRow}
+      ${restRows.length ? `<div class="fu-list-label">🔒 Locked — open the prospect's chat or profile page to unlock</div>${restRows.join('')}` : ''}
+    `;
+  } else {
+    listHtml = rows.join('');
+  }
+
+  const hasOpenTasks = state.tasks.some(t => !state.actionedTasks[t.id]);
+  const noActiveBanner = !hasActiveTask && hasOpenTasks
+    ? `<div class="cr-check-banner">
+         <div>No task is unlocked. Open a prospect's chat or profile page to unlock their Send button.</div>
+         <div class="fu-banner-tip">💡 Task not unlocking? Open the prospect's <strong>profile page</strong> (click the task's link) and send the message from there.</div>
+       </div>`
+    : '';
 
   return `
     <div class="revoke-summary">${state.tasks.length} Follow-Up task${state.tasks.length !== 1 ? 's' : ''} due</div>
-    <div class="revoke-list">${rows}</div>
+    ${noActiveBanner}
+    <div class="revoke-list">${listHtml}</div>
   `;
 }
 
@@ -2750,6 +2814,9 @@ function setupGlobalDelegation() {
       const newStep = STEPS[state.currentStep];
       // Auto-load tasks for the new step using the already-applied filters,
       // so the user doesn't have to press Apply again after switching steps.
+      // Entering Follow-Up while already on a messaging thread: re-extract the
+      // thread's prospect id in case the earlier extraction ran too early.
+      if (newStep.key === 'follow_up') refreshCurrentThreadProspectId().catch(() => {});
       if (newStep.key !== 'connection_acceptance' && newStep.key !== 'chat_scraper' && newStep.enabled && state.appliedProfileId) {
         loadAllTasks().then(() => {
           if (STEPS[state.currentStep]?.key === 'follow_up') autoCheckActiveFollowUpTask().catch(() => {});
@@ -3436,14 +3503,9 @@ chrome.runtime.onMessage.addListener(message => {
 
     const step = STEPS[state.currentStep];
     if (isMessagingThreadUrl(newUrl)) {
-      refreshCurrentThreadProspectId()
-        .then(() => {
-          if (state.view === 'main' && (step.key === 'connection_request' || step.key === 'follow_up') && !state.loading && state.tasks.length > 0) {
-            if (step.key === 'follow_up') autoCheckActiveFollowUpTask().catch(() => {});
-            render();
-          }
-        })
-        .catch(() => {});
+      // Renders and runs the follow-up auto-check itself whenever the
+      // extracted prospect id changes during its poll window.
+      refreshCurrentThreadProspectId().catch(() => {});
     } else {
       state.currentThreadProspectId = '';
     }
@@ -3590,9 +3652,29 @@ chrome.runtime.onMessage.addListener(message => {
 // INIT
 // =============================================================================
 
+// The PAGE_URL/TAB_URL_CHANGED messages only arrive on navigation, so when the
+// side panel opens while the user is already on a page, ask Chrome directly.
+function seedCurrentTabUrl() {
+  return new Promise(resolve => {
+    try {
+      chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+        const url = tabs?.[0]?.url || '';
+        if (url && !state.currentTabUrl) {
+          state.currentTabUrl = url;
+          if (isMessagingThreadUrl(url)) refreshCurrentThreadProspectId().catch(() => {});
+        }
+        resolve();
+      });
+    } catch (_) {
+      resolve();
+    }
+  });
+}
+
 async function init() {
   setupGlobalDelegation();
   await loadStoredAuth();
+  await seedCurrentTabUrl();
 
   if (state.token) {
     await bootMainView();

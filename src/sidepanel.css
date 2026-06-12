@@ -310,6 +310,37 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   background: #eff6ff;
 }
 
+/* Locked rows are dimmed; hover restores full opacity so URLs stay readable */
+.cr-row-inactive {
+  opacity: 0.6;
+}
+
+.cr-row-inactive:hover {
+  opacity: 1;
+}
+
+/* Section labels splitting the Follow-Up list into ready / locked */
+.fu-list-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding: 10px 12px 2px;
+}
+
+.fu-list-label-ready {
+  color: #065f46;
+  padding-top: 4px;
+}
+
+/* Fallback tip inside the "no task unlocked" banner */
+.fu-banner-tip {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #bfdbfe;
+}
+
 .cr-send-active {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.3);
   animation: cr-pulse 1.5s ease-in-out infinite;
@@ -1097,8 +1128,6 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   word-break: break-word;
   color: #334155;
   cursor: pointer;
-  max-height: 100px;
-  overflow-y: auto;
 }
 
 .cr-copy-btn {
