@@ -242,6 +242,13 @@ function getAppliedProfileName() {
   return profile?.profile_name || '';
 }
 
+// AI Suggestion (step 6) is gated to the Leadblocks customer for now.
+const AI_SUGGESTION_CUSTOMERS = ['leadblocks'];
+function isAiSuggestionEnabled() {
+  const customer = state.customers.find(c => (c.profiles || []).some(p => String(p.id) === String(state.appliedProfileId)));
+  return AI_SUGGESTION_CUSTOMERS.includes((customer?.customer_name || '').trim().toLowerCase());
+}
+
 function isConnectionAcceptanceOverlayMatch() {
   const overlayId = normalizeProspectId(state.currentOverlayProspectId);
   const selectedId = getSelectedConnectionProspectId();
@@ -1657,8 +1664,8 @@ function buildFollowUpList() {
   const hasOpenTasks = state.tasks.some(t => !state.actionedTasks[t.id]);
   const noActiveBanner = !hasActiveTask && hasOpenTasks
     ? `<div class="cr-check-banner">
-         <div>No task is unlocked. Open a prospect's chat or profile page to unlock their Send button.</div>
-         <div class="fu-banner-tip">💡 Task not unlocking? Open the prospect's <strong>profile page</strong> (click the task's link) and send the message from there.</div>
+         <div>No task is unlocked. Open a prospect's chat to unlock their Send button.</div>
+         <div class="fu-banner-tip">💡 Task not unlocking? Try <strong>switching chats</strong> first. If that doesn't work, try <strong>refreshing the page</strong> to sync the chat. If that still doesn't work, you can send from the prospect's <strong>profile page</strong> (click the task's link) as a last resort.</div>
        </div>`
     : '';
 
@@ -1678,6 +1685,7 @@ function buildChatterTasksList() {
     const aiSuggestion = state.chatterAiSuggestion[tid] || '';
     const aiLoading = !!state.chatterAiLoading[tid];
     const aiError = state.chatterAiError[tid] || null;
+    const aiSuggestionEnabled = isAiSuggestionEnabled();
     const sentKind = state.chatterSent[tid];
     const isDisconnected = !!state.chatterDisconnected[tid];
     const followUpChecked = !!state.chatterFollowUp[tid];
@@ -1794,10 +1802,15 @@ function buildChatterTasksList() {
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>
               Back to campaign
             </button>
-            <button class="ct-action-tab ${action === 'ai_suggestion' ? 'active' : ''}" disabled title="Coming soon" style="opacity:0.45;cursor:not-allowed;">
+            ${aiSuggestionEnabled ? `
+            <button class="ct-action-tab ${action === 'ai_suggestion' ? 'active' : ''}" data-ct-set-action="ai_suggestion" data-ct-tid="${esc(tid)}">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 0-7.07 17.07L12 22l7.07-2.93A10 10 0 0 0 12 2zm0 3a4 4 0 1 1-4 4 4 4 0 0 1 4-4zm0 14.5c-2.33 0-4.4-1.17-5.7-2.95.35-1.89 3.8-2.95 5.7-2.95s5.35 1.06 5.7 2.95C16.4 18.33 14.33 19.5 12 19.5z"></path></svg>
               AI Suggestion
-            </button>
+            </button>` : `
+            <button class="ct-action-tab" disabled title="Coming soon" style="opacity:0.45;cursor:not-allowed;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 0-7.07 17.07L12 22l7.07-2.93A10 10 0 0 0 12 2zm0 3a4 4 0 1 1-4 4 4 4 0 0 1 4-4zm0 14.5c-2.33 0-4.4-1.17-5.7-2.95.35-1.89 3.8-2.95 5.7-2.95s5.35 1.06 5.7 2.95C16.4 18.33 14.33 19.5 12 19.5z"></path></svg>
+              AI Suggestion
+            </button>`}
             ${hasOtherDmuCampaigns ? `
             <button class="ct-action-tab ${action === 'other_dmu' ? 'active' : ''}" data-ct-set-action="other_dmu" data-ct-tid="${esc(tid)}">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
@@ -1851,10 +1864,22 @@ function buildChatterTasksList() {
             </button>
           </div>` : ''}
 
-          ${action === 'ai_suggestion' ? `
+          ${action === 'ai_suggestion' ? (aiSuggestionEnabled ? `
+          <div class="ct-form">
+            <p class="ct-hint">Generate a reply suggestion from the chat history and campaign context.</p>
+            ${aiError ? `<div class="error-msg">${esc(aiError)}</div>` : ''}
+            ${aiSuggestion ? `
+            <div class="ct-reply-textarea-wrap">
+              <textarea class="ct-input ct-reply-textarea" readonly rows="6">${esc(aiSuggestion)}</textarea>
+              <button class="cr-copy-btn" data-copy="${esc(aiSuggestion)}" title="Copy suggestion">Copy</button>
+            </div>` : ''}
+            <button class="btn btn-primary btn-xs" data-ct-action="generate_ai_suggestion" data-ct-tid="${esc(tid)}" ${aiLoading ? 'disabled' : ''}>
+              ${aiLoading ? 'Generating…' : (aiSuggestion ? 'Regenerate suggestion' : 'Generate suggestion')}
+            </button>
+          </div>` : `
           <div class="ct-form">
             <p class="ct-hint">AI Suggestion is coming soon.</p>
-          </div>` : ''}
+          </div>`) : ''}
 
           ${action === 'disconnect' ? `
           <div class="ct-form">
@@ -2128,17 +2153,6 @@ async function handleChatterAiSuggestion(tid) {
   }
 }
 
-async function handleCopyAiSuggestion(tid) {
-  const text = state.chatterAiSuggestion[tid];
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    showToast('AI suggestion copied to clipboard');
-  } catch (err) {
-    showToast('Failed to copy suggestion', 'error');
-  }
-}
-
 function ctDmuToggle(tid, val) {
   const hidden = document.getElementById(`ct-dmu-conn-${tid}`);
   if (hidden) hidden.value = val;
@@ -2206,15 +2220,49 @@ async function handleChatterOtherDmu(tid) {
   }
 }
 
+// Builds the placeholder lookup map from a chatter task, matching the keys
+// Strapi uses when personalising campaign content (see connect.ts): standard
+// fields plus any per-prospect custom placeholders (name → value, spaces
+// normalised to underscores).
+function buildPlaceholderMap(task) {
+  const map = {
+    first_name: task.first_name || '',
+    last_name: task.last_name || '',
+    full_name: [task.first_name, task.last_name].filter(Boolean).join(' '),
+    job_title: task.job_title || '',
+    company_name: task.company_name || '',
+    linkedin_group: task.linkedin_group || '',
+  };
+  for (const p of task.placeholders || []) {
+    if (!p?.name) continue;
+    const key = p.name.trim().replace(/\s+/g, '_').toLowerCase();
+    map[key] = p.value || '';
+  }
+  return map;
+}
+
+// Mirrors the campaign-content convention in Strapi (replacePlaceholders in
+// queues/handlers/utils.ts): any *key* or {key} token is looked up in the
+// placeholder map. Unknown tokens are left in place so they stay visible
+// instead of being silently dropped.
 function replaceTemplatePlaceholders(template, placeholders) {
   if (!template) return '';
+  const lookup = (key) => {
+    const k = key.toLowerCase();
+    // Accept *firstname* / *first_name* and the full-name aliases.
+    const aliases = {
+      firstname: 'first_name',
+      lastname: 'last_name',
+      name: 'full_name',
+      fullname: 'full_name',
+    };
+    const resolved = aliases[k] || k;
+    const value = placeholders[resolved];
+    return value != null && value !== '' ? value : null;
+  };
   return template
-    .replace(/\{first_name\}/gi, placeholders.first_name || '')
-    .replace(/\{last_name\}/gi, placeholders.last_name || '')
-    .replace(/\{name\}/gi, placeholders.full_name || '')
-    .replace(/\{full_name\}/gi, placeholders.full_name || '')
-    .replace(/\*firstname\*/gi, placeholders.first_name || '')
-    .replace(/\*lastname\*/gi, placeholders.last_name || '');
+    .replace(/\*(\w+)\*/g, (match, key) => lookup(key) ?? match)
+    .replace(/\{(\w+)\}/g, (match, key) => lookup(key) ?? match);
 }
 
 async function showReplyTemplatesPopup(tid) {
@@ -2228,11 +2276,7 @@ async function showReplyTemplatesPopup(tid) {
     message: '',
     loading: true,
     error: null,
-    placeholders: {
-      first_name: task.first_name || '',
-      last_name: task.last_name || '',
-      full_name: [task.first_name, task.last_name].filter(Boolean).join(' '),
-    },
+    placeholders: buildPlaceholderMap(task),
   };
   render();
 
@@ -2919,7 +2963,6 @@ function setupGlobalDelegation() {
         case 'back_campaign':  handleChatterBackCampaign(tid); break;
         case 'disconnect':     handleChatterDisconnect(tid); break;
         case 'generate_ai_suggestion': handleChatterAiSuggestion(tid); break;
-        case 'copy_ai_suggestion': handleCopyAiSuggestion(tid); break;
         case 'other_dmu':      handleChatterOtherDmu(tid); break;
         case 'dmu_toggle':     ctDmuToggle(tid, ctBtn.dataset.ctVal); break;
       }
