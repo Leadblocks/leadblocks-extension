@@ -2238,6 +2238,12 @@ function buildPlaceholderMap(task) {
     const key = p.name.trim().replace(/\s+/g, '_').toLowerCase();
     map[key] = p.value || '';
   }
+  const ref = task.referral;
+  if (ref) {
+    for (const [field, val] of Object.entries(ref)) {
+      map[`${field}_referral`] = val || '';
+    }
+  }
   return map;
 }
 
