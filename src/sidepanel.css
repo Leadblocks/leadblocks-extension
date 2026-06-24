@@ -1099,6 +1099,27 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   border-color: #94a3b8;
 }
 
+.ct-name-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.ct-name-row .fu-name-chip {
+  margin-top: 0;
+}
+
+.ct-name-edit-form {
+  margin-top: 6px;
+}
+
+.ct-name-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .fu-name-chip.copied {
   background: #bbf7d0;
   border-color: #86efac;

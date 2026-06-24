@@ -142,6 +142,7 @@ const state = {
   chatterFollowUp: {},    // taskDocId -> bool (controls follow-up date visibility)
   chatterTaskTags: {},    // taskDocId -> array of {id, tag_name, colour, is_standard}
   chatterTagSelectorOpen: {}, // taskDocId -> bool (is the tag dropdown open)
+  chatterNameEditOpen: {},    // taskDocId -> bool (is the inline name editor open)
   availableTagsByProfile: {}, // numericProfileId -> array of tags (cached for chatter tasks tab)
   otherDmuCampaignsByProfile: {}, // numericProfileId -> array of {id, campaign_name} (Other DMU campaigns)
   campaignContentPopup: null, // null | { title, content: [...] , loading: bool, error: string }
@@ -1766,13 +1767,36 @@ function buildChatterTasksList() {
           ${task.data_type ? `<span class="badge badge-fu">${esc(task.data_type)}</span>` : ''}
           ${dueHtml}
         </div>
-        ${name ? `<button class="fu-name-chip" data-copy="${esc(name)}" title="Click to copy name">
-          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-          </svg>
-          ${esc(name)}
-        </button>` : ''}
+        ${task.campaign_prospect?.id ? `
+        <div class="ct-name-row">
+          ${name ? `<button class="fu-name-chip" data-copy="${esc(name)}" title="Click to copy name">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            ${esc(name)}
+          </button>` : '<span class="revoke-url muted">No name</span>'}
+          <button class="ct-icon-btn ct-name-edit-btn" data-ct-name-edit="${esc(tid)}" title="Edit prospect name">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+          </button>
+        </div>
+        ${state.chatterNameEditOpen[tid] ? `
+        <div class="ct-form ct-name-edit-form">
+          <div class="ct-form-row">
+            <div class="ct-form-col">
+              <label class="ct-label">First name</label>
+              <input type="text" class="ct-inpNaut" id="ct-name-fname-${esc(tid)}" value="${esc(task.first_name || '')}" placeholder="First name" />
+            </div>
+            <div class="ct-form-col">
+              <label class="ct-label">Last name</label>
+              <input type="text" class="ct-input" id="ct-name-lname-${esc(tid)}" value="${esc(task.last_name || '')}" placeholder="Last name" />
+            </div>
+          </div>
+          <div class="ct-name-edit-actions">
+            <button class="btn btn-ghost btn-xs" data-ct-name-edit-cancel="${esc(tid)}">Cancel</button>
+            <button class="btn btn-primary btn-xs" data-ct-action="edit_prospect_name" data-ct-tid="${esc(tid)}">Save name</button>
+          </div>
+        </div>` : ''}` : ''}
         ${campaignHtml || hasNotes || chatBtn || replyTemplatesBtn ? `<div class="ct-line2">${campaignHtml}${notesBtn}${chatBtn}${replyTemplatesBtn}</div>` : ''}
         ${task.content ? `
         <div class="cr-content-wrap">
@@ -2214,6 +2238,45 @@ async function handleChatterOtherDmu(tid) {
     state.chatterSent[tid] = 'other_dmu';
     saveActionedState();
     showToast('Other DMU toegevoegd!');
+    render();
+  } catch (err) {
+    showToast(`Mislukt: ${err.message}`, 'error');
+  }
+}
+
+async function handleChatterEditProspectName(tid) {
+  const task = getChatterTask(tid);
+  if (!task) return;
+  const campaignProspectId = task.campaign_prospect?.id;
+  if (!campaignProspectId) {
+    showToast('Cannot edit: no campaign prospect linked.', 'error');
+    return;
+  }
+  const firstName = el(`ct-name-fname-${tid}`)?.value?.trim() || '';
+  const lastName  = el(`ct-name-lname-${tid}`)?.value?.trim() || '';
+  if (!firstName || !lastName) {
+    showToast('Please fill in both first and last name.', 'error');
+    return;
+  }
+  // No-op if nothing changed
+  if (firstName === (task.first_name || '') && lastName === (task.last_name || '')) {
+    state.chatterNameEditOpen[tid] = false;
+    render();
+    return;
+  }
+
+  try {
+    await apiPost('/api/data-senders/edit_prospect_name', {
+      campaign_prospect_id: campaignProspectId,
+      source_task_document_id: tid,
+      first_name: firstName,
+      last_name: lastName,
+    });
+    // Optimistically reflect the cleaned name in the UI.
+    task.first_name = firstName;
+    task.last_name = lastName;
+    state.chatterNameEditOpen[tid] = false;
+    showToast('Name edited');
     render();
   } catch (err) {
     showToast(`Mislukt: ${err.message}`, 'error');
@@ -2971,6 +3034,7 @@ function setupGlobalDelegation() {
         case 'generate_ai_suggestion': handleChatterAiSuggestion(tid); break;
         case 'other_dmu':      handleChatterOtherDmu(tid); break;
         case 'dmu_toggle':     ctDmuToggle(tid, ctBtn.dataset.ctVal); break;
+        case 'edit_prospect_name': handleChatterEditProspectName(tid); break;
       }
       return;
     }
@@ -2979,6 +3043,24 @@ function setupGlobalDelegation() {
     const viewCampaignBtn = e.target.closest('[data-ct-view-campaign]');
     if (viewCampaignBtn) {
       showCampaignContentPopup(viewCampaignBtn.dataset.ctViewCampaign);
+      return;
+    }
+
+    // Open the inline prospect-name editor
+    const nameEditBtn = e.target.closest('[data-ct-name-edit]');
+    if (nameEditBtn) {
+      const tid = nameEditBtn.dataset.ctNameEdit;
+      state.chatterNameEditOpen[tid] = !state.chatterNameEditOpen[tid];
+      render();
+      return;
+    }
+
+    // Cancel the inline prospect-name editor
+    const nameEditCancelBtn = e.target.closest('[data-ct-name-edit-cancel]');
+    if (nameEditCancelBtn) {
+      const tid = nameEditCancelBtn.dataset.ctNameEditCancel;
+      state.chatterNameEditOpen[tid] = false;
+      render();
       return;
     }
 
