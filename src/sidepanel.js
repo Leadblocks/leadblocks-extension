@@ -135,9 +135,10 @@ const state = {
   chatterAction: {},      // taskDocId -> 'send_message' | 'forward_client' | 'back_campaign' | 'disconnect' | 'other_dmu'
   chatterSent: {},        // taskDocId -> 'message' | 'forwarded' | 'back_campaign'
   chatterDisconnected: {},// taskDocId -> true
-  chatterAiSuggestion: {}, // taskDocId -> generated AI suggestion text
+  chatterAiSuggestion: {}, // taskDocId -> array of {angle, message} suggestion variants
   chatterAiLoading: {},    // taskDocId -> bool
   chatterAiError: {},      // taskDocId -> error message
+  chatterAiNote: {},       // taskDocId -> optional prompt note to tailor the AI suggestion
   disconnectPending: {},  // unused — kept for compatibility
   chatterFollowUp: {},    // taskDocId -> bool (controls follow-up date visibility)
   chatterTaskTags: {},    // taskDocId -> array of {id, tag_name, colour, is_standard}
@@ -243,9 +244,14 @@ function getAppliedProfileName() {
   return profile?.profile_name || '';
 }
 
-// AI Suggestion (step 6) is gated to the Leadblocks customer for now.
+// AI Suggestion (step 6) is gated to the Leadblocks customer for now,
+// except for AI Campaign tasks where it is always available.
 const AI_SUGGESTION_CUSTOMERS = ['leadblocks'];
-function isAiSuggestionEnabled() {
+// Must match CHATTER_AI_PROMPT_NOTE_MAX_LENGTH in the backend extension controller.
+// Sized so a copied LinkedIn post fits.
+const AI_PROMPT_NOTE_MAX_LENGTH = 1500;
+function isAiSuggestionEnabled(task) {
+  if (task?.campaign_prospect?.campaign?.campaign_type === 'AI Campaign') return true;
   const customer = state.customers.find(c => (c.profiles || []).some(p => String(p.id) === String(state.appliedProfileId)));
   return AI_SUGGESTION_CUSTOMERS.includes((customer?.customer_name || '').trim().toLowerCase());
 }
@@ -1683,10 +1689,11 @@ function buildChatterTasksList() {
   const rows = state.tasks.map(task => {
     const tid = task.documentId;
     const action = state.chatterAction[tid] || '';
-    const aiSuggestion = state.chatterAiSuggestion[tid] || '';
+    const aiVariants = state.chatterAiSuggestion[tid] || [];
     const aiLoading = !!state.chatterAiLoading[tid];
     const aiError = state.chatterAiError[tid] || null;
-    const aiSuggestionEnabled = isAiSuggestionEnabled();
+    const aiNote = state.chatterAiNote[tid] || '';
+    const aiSuggestionEnabled = isAiSuggestionEnabled(task);
     const sentKind = state.chatterSent[tid];
     const isDisconnected = !!state.chatterDisconnected[tid];
     const followUpChecked = !!state.chatterFollowUp[tid];
@@ -1734,8 +1741,10 @@ function buildChatterTasksList() {
             ${tagsExpanded ? '▴ Less' : `▾ +${selectableTags.length}`}
           </button>` : ''}
       </div>` : '';
+    const isAiCampaign = task.campaign_prospect?.campaign?.campaign_type === 'AI Campaign';
     const campaignHtml = campaignName
       ? `<span class="campaign-pill"><span class="campaign-dot${task.campaign_prospect?.campaign?.live ? ' live' : ''}"></span>${esc(campaignName)}</span>
+         ${isAiCampaign ? '<span class="badge badge-ai" title="AI Campaign — reply using the AI suggestion">🤖 AI</span>' : ''}
          <button class="ct-view-campaign-btn" data-ct-view-campaign="${esc(campaignName)}" title="View campaign content">
            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
          </button>`
@@ -1890,15 +1899,18 @@ function buildChatterTasksList() {
 
           ${action === 'ai_suggestion' ? (aiSuggestionEnabled ? `
           <div class="ct-form">
-            <p class="ct-hint">Generate a reply suggestion from the chat history and campaign context.</p>
+            <p class="ct-hint">Generates up to 3 message suggestions with different angles, based on the chat history, campaign context, the prospect's company and recent news (when found).</p>
+            <label class="ct-label">Prompt note (optional)</label>
+            <textarea class="ct-input ct-ai-note" data-tid="${esc(tid)}" rows="3" maxlength="${AI_PROMPT_NOTE_MAX_LENGTH}" placeholder="Extra instructions for the AI — or paste a recent LinkedIn post of the prospect to reference.">${esc(aiNote)}</textarea>
             ${aiError ? `<div class="error-msg">${esc(aiError)}</div>` : ''}
-            ${aiSuggestion ? `
+            ${aiVariants.map(v => `
             <div class="ct-reply-textarea-wrap">
-              <textarea class="ct-input ct-reply-textarea" readonly rows="6">${esc(aiSuggestion)}</textarea>
-              <button class="cr-copy-btn" data-copy="${esc(aiSuggestion)}" title="Copy suggestion">Copy</button>
-            </div>` : ''}
+              ${v.angle ? `<div class="ct-ai-angle">${esc(v.angle)}</div>` : ''}
+              <textarea class="ct-input ct-reply-textarea" readonly rows="5">${esc(v.message)}</textarea>
+              <button class="cr-copy-btn" data-copy="${esc(v.message)}" title="Copy suggestion">Copy</button>
+            </div>`).join('')}
             <button class="btn btn-primary btn-xs" data-ct-action="generate_ai_suggestion" data-ct-tid="${esc(tid)}" ${aiLoading ? 'disabled' : ''}>
-              ${aiLoading ? 'Generating…' : (aiSuggestion ? 'Regenerate suggestion' : 'Generate suggestion')}
+              ${aiLoading ? 'Generating…' : (aiVariants.length ? 'Regenerate suggestions' : 'Generate suggestions')}
             </button>
           </div>` : `
           <div class="ct-form">
@@ -2162,13 +2174,18 @@ async function handleChatterAiSuggestion(tid) {
   render();
 
   try {
+    const promptNote = (state.chatterAiNote[tid] || '').slice(0, AI_PROMPT_NOTE_MAX_LENGTH).trim();
     const result = await apiPost('/api/extension/chatter-ai-suggestion', {
       documentId: task.documentId || tid,
+      ...(promptNote ? { promptNote } : {}),
     });
-    if (!result || !result.suggestion) {
+    const variants = Array.isArray(result?.suggestions)
+      ? result.suggestions.filter(v => v && typeof v.message === 'string' && v.message.trim())
+      : (result?.suggestion ? [{ angle: '', message: result.suggestion }] : []);
+    if (!variants.length) {
       throw new Error(result?.message || 'No suggestion returned');
     }
-    state.chatterAiSuggestion[tid] = result.suggestion;
+    state.chatterAiSuggestion[tid] = variants;
   } catch (err) {
     state.chatterAiError[tid] = err?.message || String(err);
   } finally {
@@ -3197,6 +3214,12 @@ function setupGlobalDelegation() {
 
   // Input delegation — contact fields (class="ci")
   document.addEventListener('input', e => {
+    const aiNoteInput = e.target.closest('.ct-ai-note');
+    if (aiNoteInput && aiNoteInput.dataset.tid) {
+      state.chatterAiNote[aiNoteInput.dataset.tid] = aiNoteInput.value;
+      // No re-render needed — value is stored in state
+      return;
+    }
     const input = e.target.closest('.ci');
     if (!input) return;
     const tid = input.dataset.tid;

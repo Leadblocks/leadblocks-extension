@@ -9,7 +9,11 @@
     "tabs",
     "activeTab"
   ],
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": [
+    "https://www.linkedin.com/*",
+    "https://backend.leadblocks.nl/*",
+    "http://localhost:1337/*"
+  ],
   "side_panel": {
     "default_path": "src/sidepanel.html"
   },

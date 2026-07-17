@@ -557,6 +557,15 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
 .badge-accept { background: #dbeafe; color: #1d4ed8; }
 .badge-revoke { background: #ffedd5; color: #c2410c; }
 .badge-fu     { background: #d1fae5; color: #065f46; }
+.badge-ai     { background: #ede9fe; color: #6d28d9; }
+.ct-ai-angle {
+  font-size: 10px;
+  font-weight: 600;
+  color: #6d28d9;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin: 6px 0 2px;
+}
 
 .campaign-pill {
   display: inline-flex;
