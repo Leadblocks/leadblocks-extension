@@ -257,12 +257,12 @@ function syncDmuCapture(tid) {
   const capture = state.dmuCapture;
   if (!capture || !capture.prospect_id || !capture.slug) return form;
 
-  if (!form.url) {
-    // Nothing typed yet — adopt the scraped profile wholesale
-    form.url = capture.profile_url;
-    form.prospect_id = capture.prospect_id;
-    form.captured_slug = capture.slug;
-  } else if (capture.slug === formSlug) {
+  // Only ever link an id to a URL the chatter typed themselves, and only when the slugs
+  // match. state.dmuCapture survives across steps, so auto-filling an empty URL field from
+  // it would silently pre-fill whoever's contact info was opened last — for example during
+  // connection acceptance — and that DMU case would be created for the wrong person with a
+  // perfectly consistent url/id pair that no later check could catch.
+  if (formSlug && capture.slug === formSlug) {
     form.prospect_id = capture.prospect_id;
     form.captured_slug = capture.slug;
   }
