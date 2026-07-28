@@ -144,6 +144,10 @@ const state = {
   chatterTaskTags: {},    // taskDocId -> array of {id, tag_name, colour, is_standard}
   chatterTagSelectorOpen: {}, // taskDocId -> bool (is the tag dropdown open)
   chatterNameEditOpen: {},    // taskDocId -> bool (is the inline name editor open)
+  dmuForm: {},            // taskDocId -> {url, first_name, last_name, prospect_id, captured_slug}
+                          // Backs the Other DMU inputs so their values survive a re-render,
+                          // and holds the LinkedIn member id captured off the contact-info overlay.
+  dmuCapture: null,       // null | {prospect_id, profile_url, slug} — last contact-info scrape
   availableTagsByProfile: {}, // numericProfileId -> array of tags (cached for chatter tasks tab)
   otherDmuCampaignsByProfile: {}, // numericProfileId -> array of {id, campaign_name} (Other DMU campaigns)
   campaignContentPopup: null, // null | { title, content: [...] , loading: bool, error: string }
@@ -208,6 +212,68 @@ function urlMatches(taskUrl, tabUrl) {
 function normalizeProspectId(id) {
   if (id == null) return '';
   return String(id).trim().toLowerCase();
+}
+
+// --- Other DMU form ---------------------------------------------------------
+// The DMU prospect must be created with its LinkedIn member id, not just a URL: every
+// downstream flow (connection request, follow-up, chat ingest, task sweeps) is keyed on
+// prospect_id, so a URL-only prospect is invisible to all of them and reappears later as a
+// duplicate whose conversation lands in First Connections. The id is scraped off the
+// prospect's contact-info overlay, where the page describes exactly one person.
+
+function linkedInSlug(url) {
+  const match = String(url || '').match(/linkedin\.com\/in\/([^/?#\s]+)/i);
+  if (!match) return '';
+  try {
+    return decodeURIComponent(match[1]).trim().toLowerCase();
+  } catch (_) {
+    return match[1].trim().toLowerCase();
+  }
+}
+
+// Placeholder for tasks whose DMU form isn't open — avoids creating per-task state for
+// every row on every render.
+const EMPTY_DMU_FORM = Object.freeze({ url: '', first_name: '', last_name: '', prospect_id: '', captured_slug: '' });
+
+function getDmuForm(tid) {
+  if (!state.dmuForm[tid]) {
+    state.dmuForm[tid] = { url: '', first_name: '', last_name: '', prospect_id: '', captured_slug: '' };
+  }
+  return state.dmuForm[tid];
+}
+
+// Re-evaluates the captured id against the URL currently in the form. The URL field is
+// hand-editable, so an id is only kept while it provably belongs to that same profile —
+// a wrong prospect_id would merge two different people, which is worse than having none.
+function syncDmuCapture(tid) {
+  const form = getDmuForm(tid);
+  const formSlug = linkedInSlug(form.url);
+
+  if (form.prospect_id && form.captured_slug && form.captured_slug !== formSlug) {
+    form.prospect_id = '';
+    form.captured_slug = '';
+  }
+
+  const capture = state.dmuCapture;
+  if (!capture || !capture.prospect_id || !capture.slug) return form;
+
+  if (!form.url) {
+    // Nothing typed yet — adopt the scraped profile wholesale
+    form.url = capture.profile_url;
+    form.prospect_id = capture.prospect_id;
+    form.captured_slug = capture.slug;
+  } else if (capture.slug === formSlug) {
+    form.prospect_id = capture.prospect_id;
+    form.captured_slug = capture.slug;
+  }
+  return form;
+}
+
+function dmuIdState(tid) {
+  const form = getDmuForm(tid);
+  if (form.prospect_id && form.captured_slug && form.captured_slug === linkedInSlug(form.url)) return 'linked';
+  if (!form.url) return 'no_url';
+  return 'missing';
 }
 
 function isMessagingThreadUrl(url) {
@@ -1702,6 +1768,10 @@ function buildChatterTasksList() {
       ? (state.otherDmuCampaignsByProfile[String(profileNumericId)] || [])
       : [];
     const hasOtherDmuCampaigns = otherDmuCampaigns.length > 0;
+    // Re-check on every render: a contact-info scrape can land while the form is open
+    const isDmuForm = action === 'other_dmu';
+    const dmuForm = isDmuForm ? syncDmuCapture(tid) : EMPTY_DMU_FORM;
+    const dmuIdLinked = isDmuForm && dmuIdState(tid) === 'linked';
 
     const name = [task.first_name, task.last_name].filter(Boolean).join(' ');
     const dueHtml = task.due_date ? buildDueBadge(task.due_date) : '';
@@ -1933,15 +2003,28 @@ function buildChatterTasksList() {
               ${otherDmuCampaigns.map(c => `<option value="${esc(String(c.id))}">${esc(c.campaign_name)}</option>`).join('')}
             </select>
             <label class="ct-label">LinkedIn URL</label>
-            <input type="url" class="ct-input" id="ct-dmu-url-${esc(tid)}" placeholder="https://www.linkedin.com/in/slug/" />
+            <input type="url" class="ct-input dmu-field" data-dmu-tid="${esc(tid)}" data-dmu-field="url"
+                   id="ct-dmu-url-${esc(tid)}" placeholder="https://www.linkedin.com/in/slug/"
+                   value="${esc(dmuForm.url)}" />
+            <label class="ct-label">LinkedIn ID</label>
+            ${dmuIdLinked ? `
+              <p class="ct-hint">✓ Linked to <code>${esc(dmuForm.prospect_id)}</code></p>
+            ` : `
+              <p class="ct-hint">⚠ Not linked yet. Open the prospect's <strong>Contact info</strong> on LinkedIn so we can read their LinkedIn ID — without it the prospect cannot be matched to their response later.</p>
+              <button class="btn btn-secondary btn-xs" data-ct-action="dmu_fetch_id" data-ct-tid="${esc(tid)}" ${dmuForm.url ? '' : 'disabled'}>
+                Open contact info
+              </button>
+            `}
             <div class="ct-form-row">
               <div class="ct-form-col">
                 <label class="ct-label">First name</label>
-                <input type="text" class="ct-input" id="ct-dmu-fname-${esc(tid)}" placeholder="First name" />
+                <input type="text" class="ct-input dmu-field" data-dmu-tid="${esc(tid)}" data-dmu-field="first_name"
+                       id="ct-dmu-fname-${esc(tid)}" placeholder="First name" value="${esc(dmuForm.first_name)}" />
               </div>
               <div class="ct-form-col">
                 <label class="ct-label">Last name</label>
-                <input type="text" class="ct-input" id="ct-dmu-lname-${esc(tid)}" placeholder="Last name" />
+                <input type="text" class="ct-input dmu-field" data-dmu-tid="${esc(tid)}" data-dmu-field="last_name"
+                       id="ct-dmu-lname-${esc(tid)}" placeholder="Last name" value="${esc(dmuForm.last_name)}" />
               </div>
             </div>
             <label class="ct-label">Status</label>
@@ -1958,7 +2041,9 @@ function buildChatterTasksList() {
               <label class="ct-label">Date connected</label>
               <input type="date" class="ct-input" id="ct-dmu-date-${esc(tid)}" />
             </div>
-            <button class="btn btn-primary btn-xs" data-ct-action="other_dmu" data-ct-tid="${esc(tid)}" ${sentKind === 'other_dmu' ? 'disabled' : ''}>
+            <button class="btn btn-primary btn-xs" data-ct-action="other_dmu" data-ct-tid="${esc(tid)}"
+                    ${sentKind === 'other_dmu' || !dmuIdLinked ? 'disabled' : ''}
+                    title="${dmuIdLinked ? '' : 'Open the prospect\'s contact info first so their LinkedIn ID can be linked'}">
               ${sentKind === 'other_dmu' ? '✓ Other DMU created' : 'Create Other DMU'}
             </button>
           </div>` : ''}
@@ -2207,13 +2292,31 @@ function ctDmuToggle(tid, val) {
   if (dateRow) dateRow.style.display = val === 'connected' ? '' : 'none';
 }
 
+// Sends the chatter's tab to the prospect's contact-info overlay. That page describes one
+// person, so the LinkedIn ID scraped there provably belongs to the pasted URL — a plain
+// profile page also lists "people also viewed", whose ids would silently be the wrong person.
+function handleDmuFetchId(tid) {
+  const form = getDmuForm(tid);
+  const slug = linkedInSlug(form.url);
+  if (!slug) {
+    showToast('Fill in a valid LinkedIn profile URL first.', 'error');
+    return;
+  }
+  chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+    if (tabs[0]) {
+      chrome.tabs.update(tabs[0].id, { url: `https://www.linkedin.com/in/${slug}/overlay/contact-info/` });
+    }
+  });
+}
+
 async function handleChatterOtherDmu(tid) {
   const task = getChatterTask(tid);
   if (!task) return;
+  const form = getDmuForm(tid);
   const otherDmuCampaignId = parseInt(el(`ct-dmu-campaign-${tid}`)?.value || '0', 10);
-  const dmuLinkedInUrl = el(`ct-dmu-url-${tid}`)?.value?.trim() || '';
-  const dmuFirstName   = el(`ct-dmu-fname-${tid}`)?.value?.trim() || '';
-  const dmuLastName    = el(`ct-dmu-lname-${tid}`)?.value?.trim() || '';
+  const dmuLinkedInUrl = (el(`ct-dmu-url-${tid}`)?.value || form.url).trim();
+  const dmuFirstName   = (el(`ct-dmu-fname-${tid}`)?.value || form.first_name).trim();
+  const dmuLastName    = (el(`ct-dmu-lname-${tid}`)?.value || form.last_name).trim();
   const isConnected    = document.getElementById(`ct-dmu-conn-${tid}`)?.value === 'connected';
   const dateConnected  = isConnected ? (el(`ct-dmu-date-${tid}`)?.value?.trim() || '') : '';
 
@@ -2238,9 +2341,16 @@ async function handleChatterOtherDmu(tid) {
     showToast('Please fill in the date connected.', 'error');
     return;
   }
+  // Hard requirement: without the LinkedIn ID the prospect can never be matched to their
+  // chat, and the reply resurfaces as a duplicate under First Connections.
+  if (!form.prospect_id || form.captured_slug !== linkedInSlug(dmuLinkedInUrl)) {
+    showToast('Open the prospect\'s LinkedIn contact info first so their LinkedIn ID can be linked.', 'error');
+    return;
+  }
 
   try {
     await apiPost('/api/data-senders/other_dmu_referral', {
+      dmu_prospect_id: form.prospect_id,
       source_campaign_prospect_id: task.campaign_prospect?.id,
       source_task_document_id: tid,
       other_dmu_campaign_id: otherDmuCampaignId,
@@ -2253,6 +2363,7 @@ async function handleChatterOtherDmu(tid) {
       prospect_id: task.prospect_id,
     });
     state.chatterSent[tid] = 'other_dmu';
+    delete state.dmuForm[tid];
     saveActionedState();
     showToast('Other DMU toegevoegd!');
     render();
@@ -3050,6 +3161,7 @@ function setupGlobalDelegation() {
         case 'disconnect':     handleChatterDisconnect(tid); break;
         case 'generate_ai_suggestion': handleChatterAiSuggestion(tid); break;
         case 'other_dmu':      handleChatterOtherDmu(tid); break;
+        case 'dmu_fetch_id':   handleDmuFetchId(tid); break;
         case 'dmu_toggle':     ctDmuToggle(tid, ctBtn.dataset.ctVal); break;
         case 'edit_prospect_name': handleChatterEditProspectName(tid); break;
       }
@@ -3218,6 +3330,16 @@ function setupGlobalDelegation() {
     if (aiNoteInput && aiNoteInput.dataset.tid) {
       state.chatterAiNote[aiNoteInput.dataset.tid] = aiNoteInput.value;
       // No re-render needed — value is stored in state
+      return;
+    }
+    const dmuInput = e.target.closest('.dmu-field');
+    if (dmuInput && dmuInput.dataset.dmuTid) {
+      const dmuTid = dmuInput.dataset.dmuTid;
+      getDmuForm(dmuTid)[dmuInput.dataset.dmuField] = dmuInput.value;
+      // Editing the URL can invalidate a captured id; syncDmuCapture drops it when the
+      // slug no longer matches. No re-render — that would steal focus mid-typing, and
+      // the submit guard re-checks the pairing anyway.
+      if (dmuInput.dataset.dmuField === 'url') syncDmuCapture(dmuTid);
       return;
     }
     const input = e.target.closest('.ci');
@@ -3728,6 +3850,18 @@ chrome.runtime.onMessage.addListener(message => {
   // Contact info scraper — auto-fill email, phone, birthday, date_connected
   if (message.type === 'CONTACT_INFO' && message.data) {
     if (state.view !== 'main') return;
+
+    // Feed the Other DMU form. The contact-info overlay is the one page that yields a
+    // LinkedIn ID provably belonging to a single profile URL, so both keys are captured
+    // from the same page load and can't be crossed with someone else's.
+    if (message.data.prospect_id && message.data.profile_url) {
+      state.dmuCapture = {
+        prospect_id: message.data.prospect_id,
+        profile_url: message.data.profile_url,
+        slug: linkedInSlug(message.data.profile_url),
+      };
+      if (Object.values(state.chatterAction).includes('other_dmu')) render();
+    }
 
     if (message.data.prospect_id) {
       state.currentOverlayProspectId = message.data.prospect_id;
