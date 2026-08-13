@@ -1140,7 +1140,22 @@ function render() {
   const app = document.getElementById('app');
   if (!app) return;
   app.innerHTML = (state.view === 'login' ? buildLogin() : buildMain()) + buildCampaignContentPopup() + buildNotesPopup() + buildReplyTemplatesPopup() + buildChatPopup();
+  syncPopupScrollLock();
   attachListeners();
+}
+
+function isPopupOpen() {
+  return !!(state.campaignContentPopup || state.notesPopup || state.replyTemplatesPopup || state.chatPopup);
+}
+
+// While a popup is open the document itself must not scroll. Without this the wheel
+// scrolls the task list behind the overlay whenever the cursor sits on the backdrop
+// (or once the modal body hits its own end), so the list has silently moved by the
+// time the popup closes and the next click lands on the wrong prospect.
+function syncPopupScrollLock() {
+  const open = isPopupOpen();
+  document.documentElement.classList.toggle('popup-open', open);
+  document.body.classList.toggle('popup-open', open);
 }
 
 // --- Login ---

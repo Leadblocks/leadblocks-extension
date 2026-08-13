@@ -41,6 +41,14 @@ body {
   min-height: 100vh;
 }
 
+/* Toggled by syncPopupScrollLock() while a popup overlay is open: freezes the page
+   behind the overlay so the task list can't scroll away under the modal. The scroll
+   offset is kept, so closing the popup puts the list back exactly where it was. */
+html.popup-open,
+body.popup-open {
+  overflow: hidden;
+}
+
 /* ===== Header ===== */
 .header {
   display: flex;
@@ -1458,6 +1466,7 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
 .ct-cc-body {
   padding: 12px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1842,6 +1851,7 @@ select:disabled { background: var(--muted-bg); color: #9ca3af; cursor: not-allow
   gap: 4px;
   max-height: 55vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px 0;
 }
 
